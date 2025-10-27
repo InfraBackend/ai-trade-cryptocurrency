@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Trading Platform</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="app-container">
+      <!-- Header -->
+      <header class="app-header">
+        <div class="header-content">
+          <div class="header-left">
+            <h1 class="app-title">AI Trading</h1>
+            <div class="header-status">
+              <span class="status-dot active"></span>
+              <span class="status-text">运行中</span>
+            </div>
+          </div>
+          <div class="header-right">
+            <button class="btn-icon" id="refreshBtn">
+              <i class="bi bi-arrow-clockwise"></i>
+            </button>
+            <button class="btn-secondary" id="manualTradeBtn" disabled>
+              <i class="bi bi-robot"></i>
+              AI交易
+            </button>
+            <button class="btn-primary" id="addModelBtn">
+              <i class="bi bi-plus-lg"></i>
+              添加模型
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <div class="app-body">
+        <!-- Sidebar -->
+        <aside class="app-sidebar">
+          <div class="sidebar-section">
+            <div class="section-header">
+              <span>交易模型</span>
+            </div>
+            <div id="modelList" class="model-list"></div>
+          </div>
+
+          <div class="sidebar-section">
+            <div class="section-header">
+              <span>市场行情</span>
+            </div>
+            <div id="marketPrices" class="market-prices"></div>
+          </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="app-main">
+          <!-- Stats Cards -->
+          <div class="stats-grid" id="statsGrid">
+            <div class="stat-card">
+              <div class="stat-header">
+                <span class="stat-label">账户总值</span>
+                <i class="bi bi-wallet2 text-primary"></i>
+              </div>
+              <div class="stat-value">$0.00</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-header">
+                <span class="stat-label">可用现金</span>
+                <i class="bi bi-cash text-success"></i>
+              </div>
+              <div class="stat-value">$0.00</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-header">
+                <span class="stat-label">已实现盈亏</span>
+                <i class="bi bi-graph-up text-info"></i>
+              </div>
+              <div class="stat-value">$0.00</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-header">
+                <span class="stat-label">未实现盈亏</span>
+                <i class="bi bi-graph-down text-warning"></i>
+              </div>
+              <div class="stat-value">$0.00</div>
+            </div>
+          </div>
+
+          <!-- Chart -->
+          <div class="content-card">
+            <div class="card-header">
+              <h3 class="card-title">账户价值走势</h3>
+            </div>
+            <div class="card-body">
+              <div id="accountChart" style="width: 100%; height: 300px"></div>
+            </div>
+          </div>
+
+          <!-- Tabs -->
+          <div class="content-card">
+            <div class="card-tabs">
+              <button class="tab-btn active" data-tab="positions">持仓</button>
+              <button class="tab-btn" data-tab="trades">交易记录</button>
+              <button class="tab-btn" data-tab="conversations">AI对话</button>
+            </div>
+
+            <div class="tab-content active" id="positionsTab">
+              <div class="table-container">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>币种</th>
+                      <th>方向</th>
+                      <th>数量</th>
+                      <th>开仓价</th>
+                      <th>当前价</th>
+                      <th>杠杆</th>
+                      <th>盈亏</th>
+                    </tr>
+                  </thead>
+                  <tbody id="positionsBody">
+                    <tr>
+                      <td colspan="7" class="empty-state">暂无持仓</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="tab-content" id="tradesTab">
+              <div class="table-container">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>时间</th>
+                      <th>币种</th>
+                      <th>操作</th>
+                      <th>数量</th>
+                      <th>价格</th>
+                      <th>盈亏</th>
+                    </tr>
+                  </thead>
+                  <tbody id="tradesBody">
+                    <tr>
+                      <td colspan="6" class="empty-state">暂无交易记录</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="tab-content" id="conversationsTab">
+              <div id="conversationsBody" class="conversations-list">
+                <div class="empty-state">暂无对话记录</div>
+              </div>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <!-- Add Model Modal -->
+    <div class="modal" id="addModelModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>添加交易模型</h3>
+          <button class="btn-close" id="closeModalBtn">
+            <i class="bi bi-x-lg"></i>
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="form-columns">
+            <!-- Left Column: AI Configuration -->
+            <div class="form-column">
+              <div class="column-header">
+                <h4>AI 模型配置</h4>
+                <small>配置AI交易决策模型</small>
+              </div>
+
+              <div class="form-group">
+                <label>模型名称</label>
+                <input
+                  type="text"
+                  id="modelName"
+                  placeholder="例如: GPT-4"
+                  class="form-input"
+                />
+              </div>
+
+              <div class="form-group">
+                <label>API密钥</label>
+                <input
+                  type="password"
+                  id="apiKey"
+                  placeholder="sk-..."
+                  class="form-input"
+                />
+              </div>
+
+              <div class="form-group">
+                <label>API地址</label>
+                <input
+                  type="text"
+                  id="apiUrl"
+                  placeholder="https://api.openai.com"
+                  class="form-input"
+                />
+              </div>
+
+              <div class="form-group">
+                <label>模型标识符</label>
+                <input
+                  type="text"
+                  id="modelIdentifier"
+                  placeholder="gpt-4"
+                  class="form-input"
+                />
+              </div>
+
+              <div class="form-group">
+                <label>初始资金</label>
+                <input
+                  type="number"
+                  id="initialCapital"
+                  value="100000"
+                  class="form-input"
+                />
+              </div>
+            </div>
+
+            <!-- Right Column: Trading Configuration -->
+            <div class="form-column">
+              <div class="column-header">
+                <h4>交易配置</h4>
+                <small>配置交易频率、币种和AI策略</small>
+              </div>
+
+              <div class="form-group">
+                <label>交易频率 (分钟)</label>
+                <input
+                  type="number"
+                  id="tradingFrequency"
+                  value="3"
+                  min="1"
+                  max="1440"
+                  class="form-input"
+                />
+                <small class="form-hint">自动执行交易的时间间隔</small>
+              </div>
+
+              <div class="form-group">
+                <label>交易币种</label>
+                <div class="coin-selector">
+                  <label class="coin-checkbox">
+                    <input type="checkbox" value="BTC" checked />
+                    <span class="coin-label">BTC</span>
+                  </label>
+                  <label class="coin-checkbox">
+                    <input type="checkbox" value="ETH" checked />
+                    <span class="coin-label">ETH</span>
+                  </label>
+                  <label class="coin-checkbox">
+                    <input type="checkbox" value="SOL" checked />
+                    <span class="coin-label">SOL</span>
+                  </label>
+                  <label class="coin-checkbox">
+                    <input type="checkbox" value="BNB" checked />
+                    <span class="coin-label">BNB</span>
+                  </label>
+                  <label class="coin-checkbox">
+                    <input type="checkbox" value="XRP" checked />
+                    <span class="coin-label">XRP</span>
+                  </label>
+                  <label class="coin-checkbox">
+                    <input type="checkbox" value="DOGE" checked />
+                    <span class="coin-label">DOGE</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="autoTradingEnabled" checked />
+                  <span class="checkbox-text">启用自动交易</span>
+                </label>
+                <small class="form-hint">按照交易频率自动执行AI决策</small>
+              </div>
+
+              <div class="form-group">
+                <label>系统提示词 (可选)</label>
+                <textarea
+                  id="systemPrompt"
+                  placeholder="例如: Focus on conservative strategies with low leverage."
+                  class="form-textarea"
+                  rows="3"
+                ></textarea>
+                <small class="form-hint">定义AI交易策略和风格，留空使用默认</small>
+              </div>
+            </div>
+          </div>
+
+          <!-- OKX Configuration Section -->
+          <div class="form-section">
+            <div class="section-header">
+              <h4>OKX 交易配置 (可选)</h4>
+              <small>配置后将使用真实的OKX模拟交易API</small>
+            </div>
+
+            <div class="form-columns">
+              <div class="form-column">
+                <div class="form-group">
+                  <label>OKX API Key</label>
+                  <input
+                    type="password"
+                    id="okxApiKey"
+                    placeholder="输入OKX API密钥"
+                    class="form-input"
+                  />
+                </div>
+
+                <div class="form-group">
+                  <label>OKX Secret Key</label>
+                  <input
+                    type="password"
+                    id="okxSecretKey"
+                    placeholder="输入OKX私钥"
+                    class="form-input"
+                  />
+                </div>
+              </div>
+
+              <div class="form-column">
+                <div class="form-group">
+                  <label>OKX Passphrase</label>
+                  <input
+                    type="password"
+                    id="okxPassphrase"
+                    placeholder="输入OKX密码短语"
+                    class="form-input"
+                  />
+                </div>
+
+                <div class="form-group">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="okxSandboxMode" checked />
+                    <span class="checkbox-text">沙盒模式 (推荐用于测试)</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <button type="button" class="btn-secondary" id="testOkxBtn">
+                测试OKX配置
+              </button>
+              <span id="okxTestResult" class="test-result"></span>
+            </div>
+          </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn-secondary" id="cancelBtn">取消</button>
+          <button class="btn-primary" id="submitBtn">确认添加</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
