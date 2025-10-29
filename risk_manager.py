@@ -102,12 +102,56 @@ class RiskManager:
             }
     
     def check_stop_loss_take_profit(self, portfolio: Dict, current_prices: Dict) -> List[Dict]:
-        """Check if any positions need stop loss or take profit execution"""
+        """Check if any positions need stop loss or take profit execution based on user configuration"""
         actions = []
+        
+        # Get model configuration for stop loss/take profit settings
+        model = self.db.get_model(self.model_id)
+        if not model:
+            return actions
+        
+        # Check if stop loss/take profit is enabled
+        stop_loss_enabled = model.get('stop_loss_enabled', False)
+        take_profit_enabled = model.get('take_profit_enabled', False)
+        
+        # If both are disabled, return empty actions
+        if not stop_loss_enabled and not take_profit_enabled:
+            return actions
+        
+        # Get actual exchange positions to verify they exist
+        exchange_positions = {}
+        try:
+            # Try to get OKX client from model
+            if model.get('okx_api_key'):
+                from okx_client import OKXClient
+                okx_client = OKXClient(
+                    api_key=model['okx_api_key'],
+                    secret_key=model['okx_secret_key'],
+                    passphrase=model['okx_passphrase'],
+                    sandbox=model.get('okx_sandbox', True)
+                )
+                
+                okx_positions = okx_client.get_positions()
+                for pos in okx_positions:
+                    if abs(float(pos.get('size', 0))) > 0:  # Only active positions
+                        symbol = pos['symbol']
+                        coin = symbol.replace('-USDT-SWAP', '')
+                        exchange_positions[coin] = pos
+        except Exception as e:
+            # If we can't get exchange positions, fall back to database positions
+            pass
+        
+        # Get user-configured percentages
+        stop_loss_pct = model.get('stop_loss_percentage', 5.0) / 100.0  # Convert to decimal
+        take_profit_pct = model.get('take_profit_percentage', 15.0) / 100.0  # Convert to decimal
         
         for position in portfolio.get('positions', []):
             coin = position['coin']
             if coin not in current_prices:
+                continue
+            
+            # Skip if position doesn't exist on exchange (phantom position)
+            if exchange_positions and coin not in exchange_positions:
                 continue
                 
             current_price = current_prices[coin]
@@ -121,24 +165,28 @@ class RiskManager:
             else:
                 pnl_pct = (entry_price - current_price) / entry_price
             
-            # Check stop loss (5% loss)
-            if pnl_pct <= -0.05:
+            # Check stop loss (user-configured percentage loss)
+            if stop_loss_enabled and pnl_pct <= -stop_loss_pct:
                 actions.append({
                     'action': 'stop_loss',
                     'coin': coin,
-                    'reason': f'Stop loss triggered: {pnl_pct:.1%} loss',
+                    'reason': f'Stop loss triggered: {pnl_pct:.1%} loss (threshold: {stop_loss_pct:.1%})',
                     'quantity': quantity,
-                    'side': 'sell' if side == 'long' else 'buy'
+                    'side': 'sell' if side == 'long' else 'buy',
+                    'entry_price': entry_price,
+                    'position_side': side
                 })
             
-            # Check take profit (15% gain)
-            elif pnl_pct >= 0.15:
+            # Check take profit (user-configured percentage gain)
+            elif take_profit_enabled and pnl_pct >= take_profit_pct:
                 actions.append({
                     'action': 'take_profit',
                     'coin': coin,
-                    'reason': f'Take profit triggered: {pnl_pct:.1%} gain',
+                    'reason': f'Take profit triggered: {pnl_pct:.1%} gain (threshold: {take_profit_pct:.1%})',
                     'quantity': quantity,
-                    'side': 'sell' if side == 'long' else 'buy'
+                    'side': 'sell' if side == 'long' else 'buy',
+                    'entry_price': entry_price,
+                    'position_side': side
                 })
         
         return actions

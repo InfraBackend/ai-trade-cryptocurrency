@@ -54,6 +54,11 @@
               <span>市场行情</span>
             </div>
             <div id="marketPrices" class="market-prices"></div>
+            
+            <div class="section-header" style="margin-top: 15px;">
+              <span>数据源状态</span>
+            </div>
+            <div id="dataSourceStatus" class="data-source-status"></div>
           </div>
         </aside>
 
@@ -61,33 +66,59 @@
         <main class="app-main">
           <!-- Stats Cards -->
           <div class="stats-grid" id="statsGrid">
-            <div class="stat-card">
+            <div class="stat-card account-value">
               <div class="stat-header">
+                <i class="bi bi-wallet2 stat-icon"></i>
                 <span class="stat-label">账户总值</span>
-                <i class="bi bi-wallet2 text-primary"></i>
               </div>
-              <div class="stat-value">$0.00</div>
+              <div class="stat-main">
+                <div class="stat-value" id="accountValue">$0.00</div>
+                <div class="stat-change" id="accountChange">+0.00%</div>
+              </div>
+              <div class="stat-detail">
+                <span class="detail-label">总收益率</span>
+                <span class="detail-value" id="totalReturnPercent">+0.00%</span>
+              </div>
             </div>
-            <div class="stat-card">
+            <div class="stat-card cash-available">
               <div class="stat-header">
+                <i class="bi bi-cash stat-icon"></i>
                 <span class="stat-label">可用现金</span>
-                <i class="bi bi-cash text-success"></i>
               </div>
-              <div class="stat-value">$0.00</div>
+              <div class="stat-main">
+                <div class="stat-value" id="cashValue">$0.00</div>
+                <div class="stat-percentage" id="cashPercentage">0.0%</div>
+              </div>
+              <div class="stat-detail">
+                <span class="detail-label">仓位占比</span>
+                <span class="detail-value" id="positionPercent">0.0%</span>
+              </div>
             </div>
-            <div class="stat-card">
+            <div class="stat-card realized-pnl">
               <div class="stat-header">
+                <i class="bi bi-graph-up stat-icon"></i>
                 <span class="stat-label">已实现盈亏</span>
-                <i class="bi bi-graph-up text-info"></i>
               </div>
-              <div class="stat-value">$0.00</div>
+              <div class="stat-main">
+                <div class="stat-value pnl-value" id="realizedPnl">$0.00</div>
+                <div class="stat-percentage pnl-percentage" id="realizedPnlPercent">0.00%</div>
+              </div>
+              <div class="stat-detail">
+                <span class="detail-label">已平仓收益</span>
+              </div>
             </div>
-            <div class="stat-card">
+            <div class="stat-card unrealized-pnl">
               <div class="stat-header">
+                <i class="bi bi-graph-down stat-icon"></i>
                 <span class="stat-label">未实现盈亏</span>
-                <i class="bi bi-graph-down text-warning"></i>
               </div>
-              <div class="stat-value">$0.00</div>
+              <div class="stat-main">
+                <div class="stat-value pnl-value" id="unrealizedPnl">$0.00</div>
+                <div class="stat-percentage pnl-percentage" id="unrealizedPnlPercent">0.00%</div>
+              </div>
+              <div class="stat-detail">
+                <span class="detail-label">持仓浮动收益</span>
+              </div>
             </div>
           </div>
 
@@ -304,6 +335,64 @@
             </div>
           </div>
 
+          <!-- Risk Management Section -->
+          <div class="form-section">
+            <div class="section-header">
+              <h4>风险管理配置</h4>
+              <small>配置自动止盈止损策略</small>
+            </div>
+
+            <div class="form-columns">
+              <div class="form-column">
+                <div class="form-group">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="stopLossEnabled" />
+                    <span class="checkbox-text">启用止损</span>
+                  </label>
+                  <small class="form-hint">当亏损达到设定百分比时自动平仓</small>
+                </div>
+
+                <div class="form-group">
+                  <label>止损百分比 (%)</label>
+                  <input
+                    type="number"
+                    id="stopLossPercentage"
+                    value="5.0"
+                    min="0.1"
+                    max="50"
+                    step="0.1"
+                    class="form-input"
+                  />
+                  <small class="form-hint">亏损超过此百分比时触发止损</small>
+                </div>
+              </div>
+
+              <div class="form-column">
+                <div class="form-group">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="takeProfitEnabled" />
+                    <span class="checkbox-text">启用止盈</span>
+                  </label>
+                  <small class="form-hint">当盈利达到设定百分比时自动平仓</small>
+                </div>
+
+                <div class="form-group">
+                  <label>止盈百分比 (%)</label>
+                  <input
+                    type="number"
+                    id="takeProfitPercentage"
+                    value="15.0"
+                    min="0.1"
+                    max="100"
+                    step="0.1"
+                    class="form-input"
+                  />
+                  <small class="form-hint">盈利超过此百分比时触发止盈</small>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- OKX Configuration Section -->
           <div class="form-section">
             <div class="section-header">
@@ -366,6 +455,44 @@
         <div class="modal-footer">
           <button class="btn-secondary" id="cancelBtn">取消</button>
           <button class="btn-primary" id="submitBtn">确认添加</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- AI Trading Result Modal -->
+    <div class="modal" id="aiTradingResultModal">
+      <div class="modal-content ai-result-modal">
+        <div class="modal-header">
+          <h3>AI交易分析结果</h3>
+          <button class="btn-close" id="closeAiResultBtn">
+            <i class="bi bi-x-lg"></i>
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="ai-result-content">
+            <div class="result-section">
+              <h4>📊 市场分析</h4>
+              <div id="marketAnalysisContent" class="analysis-content"></div>
+            </div>
+            
+            <div class="result-section">
+              <h4>🎯 交易决策</h4>
+              <div id="tradingDecisionsContent" class="decisions-content"></div>
+            </div>
+            
+            <div class="result-section">
+              <h4>⚡ 执行结果</h4>
+              <div id="executionResultsContent" class="execution-content"></div>
+            </div>
+            
+            <div class="result-section">
+              <h4>💡 最终建议</h4>
+              <div id="finalRecommendationsContent" class="recommendations-content"></div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn-primary" id="confirmAiResultBtn">确认</button>
         </div>
       </div>
     </div>

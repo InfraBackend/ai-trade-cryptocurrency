@@ -41,6 +41,14 @@ class TradingApp {
       .getElementById("manualTradeBtn")
       .addEventListener("click", () => this.executeManualTrade());
 
+    // AI Trading Result Modal event listeners
+    document
+      .getElementById("closeAiResultBtn")
+      .addEventListener("click", () => this.hideAiTradingModal());
+    document
+      .getElementById("confirmAiResultBtn")
+      .addEventListener("click", () => this.hideAiTradingModal());
+
     document.querySelectorAll(".tab-btn").forEach((btn) => {
       btn.addEventListener("click", (e) =>
         this.switchTab(e.target.dataset.tab)
@@ -440,8 +448,22 @@ class TradingApp {
       const response = await fetch("/api/market/prices");
       const prices = await response.json();
       this.renderMarketPrices(prices);
+
+      // Also load data source status
+      this.loadDataSourceStatus();
     } catch (error) {
       console.error("Failed to load market prices:", error);
+      this.showDataSourceError();
+    }
+  }
+
+  async loadDataSourceStatus() {
+    try {
+      const response = await fetch("/api/market/sources/status");
+      const data = await response.json();
+      this.renderDataSourceStatus(data.sources);
+    } catch (error) {
+      console.error("Failed to load data source status:", error);
     }
   }
 
@@ -466,6 +488,46 @@ class TradingApp {
             `;
       })
       .join("");
+  }
+
+  renderDataSourceStatus(sources) {
+    const container = document.getElementById("dataSourceStatus");
+    if (!container) return;
+
+    const sourceNames = {
+      binance: "Binance",
+      coingecko: "CoinGecko",
+      okx: "OKX",
+    };
+
+    container.innerHTML = Object.entries(sources)
+      .map(([source, status]) => {
+        const statusClass =
+          status === "online" ? "source-online" : "source-offline";
+        const statusIcon = status === "online" ? "🟢" : "🔴";
+
+        return `
+          <div class="source-status ${statusClass}">
+            <span class="source-icon">${statusIcon}</span>
+            <span class="source-name">${sourceNames[source] || source}</span>
+            <span class="source-status-text">${status}</span>
+          </div>
+        `;
+      })
+      .join("");
+  }
+
+  showDataSourceError() {
+    const container = document.getElementById("dataSourceStatus");
+    if (!container) return;
+
+    container.innerHTML = `
+      <div class="source-status source-error">
+        <span class="source-icon">⚠️</span>
+        <span class="source-name">数据源状态</span>
+        <span class="source-status-text">获取失败</span>
+      </div>
+    `;
   }
 
   switchTab(tabName) {
@@ -530,6 +592,22 @@ class TradingApp {
     data.trading_coins = selectedCoins.join(",");
     data.auto_trading_enabled = autoTradingEnabled;
     data.system_prompt = systemPrompt;
+
+    // Add risk management configuration
+    const stopLossEnabled = document.getElementById("stopLossEnabled").checked;
+    const stopLossPercentage = parseFloat(
+      document.getElementById("stopLossPercentage").value
+    );
+    const takeProfitEnabled =
+      document.getElementById("takeProfitEnabled").checked;
+    const takeProfitPercentage = parseFloat(
+      document.getElementById("takeProfitPercentage").value
+    );
+
+    data.stop_loss_enabled = stopLossEnabled;
+    data.stop_loss_percentage = stopLossPercentage;
+    data.take_profit_enabled = takeProfitEnabled;
+    data.take_profit_percentage = takeProfitPercentage;
 
     // Add OKX configuration if provided
     const okxApiKey = document.getElementById("okxApiKey").value.trim();
@@ -629,6 +707,16 @@ class TradingApp {
           checkbox.checked = tradingCoins.includes(checkbox.value);
         });
 
+      // 填充风险管理配置
+      document.getElementById("stopLossEnabled").checked =
+        model.stop_loss_enabled || false;
+      document.getElementById("stopLossPercentage").value =
+        model.stop_loss_percentage || 5.0;
+      document.getElementById("takeProfitEnabled").checked =
+        model.take_profit_enabled || false;
+      document.getElementById("takeProfitPercentage").value =
+        model.take_profit_percentage || 15.0;
+
       // 填充OKX配置（如果有）
       document.getElementById("okxApiKey").value = model.okx_api_key || "";
       document.getElementById("okxSecretKey").value =
@@ -690,6 +778,12 @@ class TradingApp {
       .forEach((checkbox) => {
         checkbox.checked = true;
       });
+
+    // Clear risk management fields
+    document.getElementById("stopLossEnabled").checked = false;
+    document.getElementById("stopLossPercentage").value = "5.0";
+    document.getElementById("takeProfitEnabled").checked = false;
+    document.getElementById("takeProfitPercentage").value = "15.0";
 
     // Clear OKX fields
     document.getElementById("okxApiKey").value = "";
@@ -759,12 +853,15 @@ class TradingApp {
     const manualTradeBtn = document.getElementById("manualTradeBtn");
     const originalText = manualTradeBtn.innerHTML;
 
-    // 更新按钮状态
-    manualTradeBtn.disabled = true;
-    manualTradeBtn.innerHTML =
-      '<i class="bi bi-hourglass-split"></i> AI分析中...';
-
     try {
+      // 更新按钮状态
+      manualTradeBtn.disabled = true;
+      manualTradeBtn.innerHTML =
+        '<i class="bi bi-hourglass-split"></i> AI分析中...';
+
+      // 显示加载中的弹窗
+      this.showAiTradingModal(null, true);
+
       const response = await fetch(
         `/api/models/${this.currentModelId}/execute`,
         {
@@ -775,18 +872,22 @@ class TradingApp {
 
       const result = await response.json();
 
-      if (response.ok) {
-        // 显示交易结果
-        this.showTradeResult(result);
+      // 显示AI交易结果
+      this.showAiTradingModal(result, false);
 
+      if (response.ok && result.success) {
         // 刷新数据
         await this.loadModelData();
-      } else {
-        alert(`AI交易失败: ${result.error || "未知错误"}`);
       }
     } catch (error) {
       console.error("Failed to execute manual trade:", error);
-      alert("AI交易执行失败，请检查网络连接");
+      this.showAiTradingModal(
+        {
+          success: false,
+          error: "AI交易执行失败，请检查网络连接",
+        },
+        false
+      );
     } finally {
       // 恢复按钮状态
       manualTradeBtn.disabled = false;
@@ -837,21 +938,289 @@ class TradingApp {
   }
 
   startRefreshCycles() {
+    // 降低市场数据刷新频率：从5秒改为30秒
     this.refreshIntervals.market = setInterval(() => {
       this.loadMarketPrices();
-    }, 5000);
+    }, 30000);
 
+    // 降低投资组合数据刷新频率：从10秒改为60秒
     this.refreshIntervals.portfolio = setInterval(() => {
       if (this.currentModelId) {
         this.loadModelData();
       }
-    }, 10000);
+    }, 60000);
   }
 
   stopRefreshCycles() {
     Object.values(this.refreshIntervals).forEach((interval) => {
       if (interval) clearInterval(interval);
     });
+  }
+
+  showAiTradingModal(result, isLoading) {
+    const modal = document.getElementById("aiTradingResultModal");
+
+    if (isLoading) {
+      // 显示加载状态
+      document.getElementById("marketAnalysisContent").innerHTML = `
+        <div class="loading-spinner">
+          <div class="spinner"></div>
+          AI正在分析市场数据...
+        </div>
+      `;
+      document.getElementById("tradingDecisionsContent").innerHTML = "";
+      document.getElementById("executionResultsContent").innerHTML = "";
+      document.getElementById("finalRecommendationsContent").innerHTML = "";
+    } else if (result) {
+      // 显示结果
+      this.renderAiTradingResult(result);
+    }
+
+    modal.classList.add("show");
+  }
+
+  renderAiTradingResult(result) {
+    if (!result.success) {
+      // 显示错误信息
+      document.getElementById("marketAnalysisContent").innerHTML = `
+        <div class="execution-item">
+          <div class="execution-status error"></div>
+          <div class="execution-text">执行失败: ${
+            result.error || "未知错误"
+          }</div>
+        </div>
+      `;
+      document.getElementById("tradingDecisionsContent").innerHTML = "";
+      document.getElementById("executionResultsContent").innerHTML = "";
+      document.getElementById("finalRecommendationsContent").innerHTML = "";
+      return;
+    }
+
+    // 解析AI响应
+    let aiAnalysis = null;
+    try {
+      if (typeof result.decisions === "string") {
+        aiAnalysis = JSON.parse(result.decisions);
+      } else {
+        aiAnalysis = result.decisions;
+      }
+    } catch (e) {
+      console.warn("Failed to parse AI response as JSON, using raw response");
+      aiAnalysis = result.decisions;
+    }
+
+    // 渲染市场分析
+    this.renderMarketAnalysis(aiAnalysis);
+
+    // 渲染交易决策
+    this.renderTradingDecisions(aiAnalysis);
+
+    // 渲染执行结果
+    this.renderExecutionResults(result.executions || []);
+
+    // 渲染最终建议
+    this.renderFinalRecommendations(aiAnalysis);
+  }
+
+  renderMarketAnalysis(analysis) {
+    const content = document.getElementById("marketAnalysisContent");
+
+    if (analysis && analysis.market_analysis) {
+      const market = analysis.market_analysis;
+      const trendClass =
+        market.trend === "上涨"
+          ? "bullish"
+          : market.trend === "下跌"
+          ? "bearish"
+          : "sideways";
+
+      content.innerHTML = `
+        <div class="trend-info">
+          <span class="trend-badge ${trendClass}">${
+        market.trend || "未知"
+      }</span>
+          <span>信心度: ${market.confidence || 0}%</span>
+        </div>
+        <div class="confidence-bar">
+          <div class="confidence-progress">
+            <div class="confidence-fill" style="width: ${
+              market.confidence || 0
+            }%"></div>
+          </div>
+        </div>
+        <p><strong>关键指标:</strong> ${market.key_indicators || "暂无分析"}</p>
+      `;
+    } else {
+      content.innerHTML = `
+        <div class="analysis-content">
+          <p>AI分析结果格式异常，请查看原始响应。</p>
+          <pre style="font-size: 12px; background: var(--bg-3); padding: 8px; border-radius: 4px; overflow-x: auto;">
+${JSON.stringify(analysis, null, 2)}
+          </pre>
+        </div>
+      `;
+    }
+  }
+
+  renderTradingDecisions(analysis) {
+    const content = document.getElementById("tradingDecisionsContent");
+
+    if (analysis && analysis.trading_decisions) {
+      let decisionsHtml = "";
+
+      for (const [coin, decision] of Object.entries(
+        analysis.trading_decisions
+      )) {
+        const signalClass = decision.signal?.includes("buy")
+          ? "buy"
+          : decision.signal?.includes("sell")
+          ? "sell"
+          : "hold";
+        const signalText =
+          decision.signal === "buy_to_enter"
+            ? "开多"
+            : decision.signal === "sell_to_enter"
+            ? "开空"
+            : decision.signal === "close_position"
+            ? "平仓"
+            : "持有";
+
+        decisionsHtml += `
+          <div class="decision-card">
+            <div class="decision-header">
+              <span class="coin-name">${coin}</span>
+              <span class="signal-badge ${signalClass}">${signalText}</span>
+            </div>
+            <div class="decision-details">
+              <div class="detail-item">
+                <span class="detail-label">数量:</span>
+                <span class="detail-value">${decision.quantity || 0}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">杠杆:</span>
+                <span class="detail-value">${decision.leverage || 1}x</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">入场价:</span>
+                <span class="detail-value">$${decision.entry_price || 0}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">止盈:</span>
+                <span class="detail-value">$${
+                  decision.profit_target || 0
+                }</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">止损:</span>
+                <span class="detail-value">$${decision.stop_loss || 0}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">信心度:</span>
+                <span class="detail-value">${Math.round(
+                  (decision.confidence || 0) * 100
+                )}%</span>
+              </div>
+            </div>
+            <p style="margin-top: 8px; font-size: 12px; color: var(--text-3);">
+              <strong>理由:</strong> ${decision.justification || "暂无说明"}
+            </p>
+          </div>
+        `;
+      }
+
+      content.innerHTML = decisionsHtml || "<p>暂无交易决策</p>";
+    } else {
+      // 尝试解析旧格式
+      let decisionsHtml = "";
+      if (analysis && typeof analysis === "object") {
+        for (const [coin, decision] of Object.entries(analysis)) {
+          if (decision && typeof decision === "object" && decision.signal) {
+            const signalClass = decision.signal?.includes("buy")
+              ? "buy"
+              : decision.signal?.includes("sell")
+              ? "sell"
+              : "hold";
+            const signalText =
+              decision.signal === "buy_to_enter"
+                ? "开多"
+                : decision.signal === "sell_to_enter"
+                ? "开空"
+                : decision.signal === "close_position"
+                ? "平仓"
+                : "持有";
+
+            decisionsHtml += `
+              <div class="decision-card">
+                <div class="decision-header">
+                  <span class="coin-name">${coin}</span>
+                  <span class="signal-badge ${signalClass}">${signalText}</span>
+                </div>
+                <p style="margin-top: 8px; font-size: 12px; color: var(--text-3);">
+                  <strong>理由:</strong> ${decision.justification || "暂无说明"}
+                </p>
+              </div>
+            `;
+          }
+        }
+      }
+
+      content.innerHTML = decisionsHtml || "<p>暂无交易决策</p>";
+    }
+  }
+
+  renderExecutionResults(executions) {
+    const content = document.getElementById("executionResultsContent");
+
+    if (executions && executions.length > 0) {
+      let executionsHtml = "";
+
+      executions.forEach((execution) => {
+        const statusClass = execution.error
+          ? "error"
+          : execution.message?.includes("成功")
+          ? "success"
+          : "warning";
+        const statusText = execution.error
+          ? execution.error
+          : execution.message || "执行完成";
+
+        executionsHtml += `
+          <div class="execution-item">
+            <div class="execution-status ${statusClass}"></div>
+            <div class="execution-text">
+              <strong>${execution.coin || ""}:</strong> ${statusText}
+            </div>
+          </div>
+        `;
+      });
+
+      content.innerHTML = executionsHtml;
+    } else {
+      content.innerHTML = "<p>暂无执行结果</p>";
+    }
+  }
+
+  renderFinalRecommendations(analysis) {
+    const content = document.getElementById("finalRecommendationsContent");
+
+    if (
+      analysis &&
+      analysis.final_recommendations &&
+      Array.isArray(analysis.final_recommendations)
+    ) {
+      const recommendationsHtml = analysis.final_recommendations
+        .map((rec, index) => `<li>${index + 1}. ${rec}</li>`)
+        .join("");
+
+      content.innerHTML = `<ul class="recommendations-list">${recommendationsHtml}</ul>`;
+    } else {
+      content.innerHTML = "<p>暂无最终建议</p>";
+    }
+  }
+
+  hideAiTradingModal() {
+    const modal = document.getElementById("aiTradingResultModal");
+    modal.classList.remove("show");
   }
 }
 

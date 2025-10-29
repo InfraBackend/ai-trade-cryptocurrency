@@ -32,9 +32,11 @@ class TradingEngine:
         if ENHANCED_FEATURES:
             self.risk_manager = RiskManager(model_id, db)
             self.monitor = get_monitor(db)
+            print(f"[INFO] Risk management enabled for model {model_id}")
         else:
             self.risk_manager = None
             self.monitor = None
+            print(f"[INFO] Enhanced features not available for model {model_id}")
         
         # Load model configuration
         model = self.db.get_model(model_id)
@@ -160,7 +162,6 @@ class TradingEngine:
     def _execute_stop_loss_take_profit(self, action: Dict, current_prices: Dict) -> Dict:
         """Execute stop loss or take profit action"""
         coin = action['coin']
-        quantity = action['quantity']
         side = action['side']  # 'sell' for closing long, 'buy' for closing short
         action_type = action['action']  # 'stop_loss' or 'take_profit'
         
@@ -168,34 +169,64 @@ class TradingEngine:
         
         try:
             if self.okx_client:
-                # Execute on OKX
+                # Get actual position from OKX before closing
                 symbol = self.okx_symbols.get(coin)
-                if symbol:
-                    order_result = self.okx_client.place_order(
-                        symbol=symbol,
-                        side=side,
-                        amount=quantity,
-                        order_type='market'
+                if not symbol:
+                    return {'success': False, 'error': f'Unsupported coin: {coin}'}
+                
+                # Find the actual position
+                positions = self.okx_client.get_positions()
+                target_position = None
+                for pos in positions:
+                    if pos['symbol'] == symbol and abs(float(pos.get('size', 0))) > 0:
+                        target_position = pos
+                        break
+                
+                if not target_position:
+                    # Position already closed or doesn't exist
+                    print(f"[{action_type.upper()}] No active position found for {coin}")
+                    return {
+                        'success': False,
+                        'error': f'No active position found for {coin}'
+                    }
+                
+                # Get actual quantity from position
+                actual_quantity = abs(float(target_position.get('size', 0)))
+                
+                # Execute close position instead of placing a separate order
+                close_result = self.okx_client.close_position(symbol=symbol)
+                
+                if close_result['success']:
+                    # Calculate actual P&L for the closed position
+                    current_price = current_prices.get(coin, 0)
+                    entry_price = float(target_position.get('avg_price', current_price))
+                    position_side = target_position.get('side', 'long')
+                    
+                    # Calculate P&L based on original position side
+                    if position_side == 'long':
+                        pnl = (current_price - entry_price) * actual_quantity
+                    else:  # short position
+                        pnl = (entry_price - current_price) * actual_quantity
+                    
+                    # Close position in database
+                    self.db.close_position(self.model_id, coin, position_side)
+                    
+                    # Record the trade with actual values and correct side
+                    self.db.add_trade(
+                        self.model_id, coin, 'close_position', actual_quantity,
+                        current_price, 1, position_side, pnl=pnl
                     )
                     
-                    if order_result['success']:
-                        # Record the trade
-                        current_price = current_prices.get(coin, 0)
-                        self.db.add_trade(
-                            self.model_id, coin, 'close_position', quantity,
-                            current_price, 1, action_type, pnl=0  # PnL will be calculated
-                        )
-                        
-                        return {
-                            'success': True,
-                            'method': 'okx',
-                            'order_id': order_result.get('order_id'),
-                            'message': f'{action_type} executed on OKX'
-                        }
-                    else:
-                        return {
-                            'success': False,
-                            'method': 'okx',
+                    return {
+                        'success': True,
+                        'method': 'okx',
+                        'order_id': close_result.get('order_id'),
+                        'message': f'{action_type} executed on OKX: {actual_quantity} {coin} @ ${current_price:.2f}, P&L: ${pnl:.2f}'
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'method': 'okx',
                             'error': order_result.get('message', 'Unknown error')
                         }
             
@@ -211,20 +242,26 @@ class TradingEngine:
                     break
             
             pnl = 0
+            quantity = action.get('quantity', 0)  # Get quantity from action
+            position_side = 'long'  # Default side
+            
             if position:
                 entry_price = position['avg_price']
-                if position['side'] == 'long':
+                position_side = position['side']
+                quantity = position['quantity']  # Use actual position quantity
+                
+                if position_side == 'long':
                     pnl = (current_price - entry_price) * quantity
                 else:
                     pnl = (entry_price - current_price) * quantity
             
             # Close position in database
-            self.db.close_position(self.model_id, coin, position['side'] if position else 'long')
+            self.db.close_position(self.model_id, coin, position_side)
             
-            # Record the trade
+            # Record the trade with correct position side
             self.db.add_trade(
                 self.model_id, coin, 'close_position', quantity,
-                current_price, 1, action_type, pnl=pnl
+                current_price, 1, position_side, pnl=pnl
             )
             
             return {
@@ -504,10 +541,40 @@ class TradingEngine:
             'message': f'Simulated Short {quantity:.4f} {coin} @ ${price:.2f}'
         }
     
+    def sync_positions_with_exchange(self):
+        """Sync database positions with actual exchange positions"""
+        if not self.okx_client:
+            return
+        
+        try:
+            # Get actual positions from OKX
+            okx_positions = self.okx_client.get_positions()
+            okx_active_positions = {}
+            
+            for pos in okx_positions:
+                if abs(float(pos.get('size', 0))) > 0:  # Only active positions
+                    symbol = pos['symbol']
+                    coin = symbol.replace('-USDT-SWAP', '')
+                    okx_active_positions[coin] = pos
+            
+            # Get database positions
+            portfolio = self.db.get_portfolio(self.model_id)
+            db_positions = {pos['coin']: pos for pos in portfolio.get('positions', [])}
+            
+            # Clean up phantom positions (in database but not on exchange)
+            for coin, db_pos in db_positions.items():
+                if coin not in okx_active_positions:
+                    print(f"🧹 Cleaning up phantom position: {coin}")
+                    self.db.close_position(self.model_id, coin, db_pos['side'])
+            
+        except Exception as e:
+            print(f"Position sync error: {e}")
+
     def _execute_close(self, coin: str, decision: Dict, market_state: Dict, 
                       portfolio: Dict) -> Dict:
-        # Use OKX API if available, otherwise fallback to simulation
+        # Sync positions before closing to avoid phantom position issues
         if self.okx_client:
+            self.sync_positions_with_exchange()
             return self._execute_okx_close(coin, market_state)
         else:
             return self._execute_simulated_close(coin, market_state, portfolio)
@@ -519,26 +586,90 @@ class TradingEngine:
             if not symbol:
                 return {'coin': coin, 'error': f'Unsupported coin: {coin}'}
             
+            # Get current position before closing
+            positions = self.okx_client.get_positions()
+            target_position = None
+            for pos in positions:
+                if pos['symbol'] == symbol:
+                    target_position = pos
+                    break
+            
+            if not target_position:
+                # Check if we have a phantom position in database that needs cleanup
+                portfolio = self.db.get_portfolio(self.model_id)
+                db_position = None
+                for pos in portfolio.get('positions', []):
+                    if pos['coin'] == coin:
+                        db_position = pos
+                        break
+                
+                if db_position:
+                    # Clean up phantom position in database
+                    self.db.close_position(self.model_id, coin, db_position['side'])
+                    return {
+                        'coin': coin,
+                        'signal': 'close_position',
+                        'quantity': 0,
+                        'price': market_state[coin]['price'],
+                        'pnl': 0,
+                        'message': f'Cleaned up phantom position for {coin} (already closed on exchange)'
+                    }
+                
+                return {'coin': coin, 'error': 'No position to close'}
+            
+            # Check if position is already closed (0 quantity)
+            position_size = abs(float(target_position.get('size', 0)))
+            if position_size == 0:
+                # Position is already closed on OKX, clean up database
+                portfolio = self.db.get_portfolio(self.model_id)
+                for pos in portfolio.get('positions', []):
+                    if pos['coin'] == coin:
+                        self.db.close_position(self.model_id, coin, pos['side'])
+                        break
+                
+                return {
+                    'coin': coin,
+                    'signal': 'close_position',
+                    'quantity': 0,
+                    'price': market_state[coin]['price'],
+                    'pnl': 0,
+                    'message': f'Position for {coin} already closed on exchange, database synced'
+                }
+            
             # Close position on OKX
             close_result = self.okx_client.close_position(symbol=symbol)
             
             if close_result['success']:
                 current_price = market_state[coin]['price']
                 
-                # Record trade in database
+                # Get actual values from the position that was closed
+                closed_quantity = position_size
+                entry_price = float(target_position.get('avg_price', current_price))
+                position_side = target_position.get('side', 'long')
+                
+                # Calculate P&L
+                if position_side == 'long':
+                    pnl = (current_price - entry_price) * closed_quantity
+                else:
+                    pnl = (entry_price - current_price) * closed_quantity
+                
+                # Close position in database
+                self.db.close_position(self.model_id, coin, position_side)
+                
+                # Record trade in database with actual values
                 self.db.add_trade(
-                    self.model_id, coin, 'close_position', 0,  # Quantity will be updated from OKX
-                    current_price, 1, 'close', pnl=0  # PnL will be updated from OKX
+                    self.model_id, coin, 'close_position', closed_quantity,
+                    current_price, 1, position_side, pnl=pnl
                 )
                 
                 return {
                     'coin': coin,
                     'signal': 'close_position',
-                    'quantity': 0,  # Will be updated from OKX position data
+                    'quantity': closed_quantity,
                     'price': current_price,
-                    'pnl': 0,  # Will be updated from OKX
+                    'pnl': pnl,
                     'order_id': close_result.get('order_id'),
-                    'message': f'OKX Close {coin} position'
+                    'message': f'OKX Close {coin} position: {closed_quantity} @ ${current_price:.2f}, P&L: ${pnl:.2f}'
                 }
             else:
                 return {

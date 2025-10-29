@@ -186,8 +186,15 @@ class OKXClient:
                     error_code = data['code']
                     error_msg = data.get('msg', 'Unknown OKX API error')
                     
+                    # Log detailed error information for debugging
+                    print(f"[DEBUG] OKX API Error - Code: {error_code}, Message: {error_msg}")
+                    print(f"[DEBUG] Full response: {json.dumps(data, indent=2)}")
+                    
                     # Handle specific OKX error codes
-                    if error_code in ['50001', '50002', '50004']:
+                    if error_code == '1':
+                        # Generic operation failed - usually parameter or permission issue
+                        raise Exception(f"OKX Operation Failed: {error_msg}. Check order parameters and account permissions.")
+                    elif error_code in ['50001', '50002', '50004']:
                         # Authentication/Permission errors - don't retry
                         raise Exception(f"OKX Auth Error {error_code}: {error_msg}")
                     elif error_code in ['50011', '50012']:
@@ -202,6 +209,9 @@ class OKXClient:
                         if attempt < retry_count - 1:
                             time.sleep(2 ** attempt)
                             continue
+                    elif error_code in ['51000', '51001', '51002']:
+                        # Order related errors - don't retry
+                        raise Exception(f"OKX Order Error {error_code}: {error_msg}")
                     
                     raise Exception(f"OKX API Error {error_code}: {error_msg}")
                 
@@ -363,6 +373,107 @@ class OKXClient:
             print(f"[ERROR] Failed to get positions: {e}")
             raise e
     
+    def get_instrument_info(self, symbol: str) -> Dict:
+        """Get instrument trading rules"""
+        try:
+            response = self._make_request('GET', '/api/v5/public/instruments', 
+                                        params={'instType': 'SWAP', 'instId': symbol})
+            if response.get('code') == '0' and response.get('data'):
+                return response['data'][0]
+            return {}
+        except Exception as e:
+            print(f"[WARNING] Failed to get instrument info for {symbol}: {e}")
+            return {}
+    
+    def adjust_order_size(self, symbol: str, amount: float) -> float:
+        """Adjust order size to meet instrument requirements"""
+        try:
+            inst_info = self.get_instrument_info(symbol)
+            if inst_info:
+                lot_sz = float(inst_info.get('lotSz', 1))
+                min_sz = float(inst_info.get('minSz', 1))
+                
+                # Ensure amount meets minimum size
+                if amount < min_sz:
+                    amount = min_sz
+                
+                # Round to nearest lot size
+                adjusted_amount = round(amount / lot_sz) * lot_sz
+                
+                # Ensure it's at least the minimum
+                if adjusted_amount < min_sz:
+                    adjusted_amount = min_sz
+                
+                if adjusted_amount != amount:
+                    print(f"[INFO] Adjusted order size from {amount} to {adjusted_amount} for {symbol}")
+                
+                return adjusted_amount
+            
+            return amount
+        except Exception as e:
+            print(f"[WARNING] Failed to adjust order size for {symbol}: {e}")
+            return amount
+
+    def _place_close_order(self, symbol: str, side: str, amount: float, position_side: str) -> Dict:
+        """Place a close position order with correct posSide"""
+        try:
+            endpoint = '/api/v5/trade/order'
+            
+            # Adjust order size to meet instrument requirements
+            adjusted_amount = self.adjust_order_size(symbol, amount)
+            
+            # Prepare close order data
+            order_data = {
+                'instId': symbol,
+                'tdMode': 'cross',  # Cross margin mode
+                'side': side,  # 'sell' for closing long, 'buy' for closing short
+                'ordType': 'market',
+                'sz': str(adjusted_amount),
+                'posSide': position_side  # Use original position side for closing
+            }
+            
+            print(f"[INFO] Placing OKX close order: {order_data}")
+            
+            response = self._make_request('POST', endpoint, body=order_data)
+            print(f"[INFO] OKX close order response: {response}")
+            
+            order_result = {
+                'success': False,
+                'order_id': None,
+                'message': 'Close order failed'
+            }
+            
+            if 'data' in response and response['data']:
+                order_info = response['data'][0]
+                if order_info.get('sCode') == '0':  # Success
+                    order_result = {
+                        'success': True,
+                        'order_id': order_info.get('ordId'),
+                        'client_order_id': order_info.get('clOrdId'),
+                        'message': 'Close order placed successfully',
+                        'original_amount': amount,
+                        'adjusted_amount': adjusted_amount
+                    }
+                    print(f"[SUCCESS] OKX close order placed: {order_result}")
+                else:
+                    error_code = order_info.get('sCode', 'Unknown')
+                    error_msg = order_info.get('sMsg', 'Close order failed')
+                    order_result['message'] = f"Close Order Error {error_code}: {error_msg}"
+                    print(f"[ERROR] OKX close order failed - Code: {error_code}, Message: {error_msg}")
+            else:
+                print(f"[ERROR] Invalid OKX close order response format: {response}")
+            
+            return order_result
+            
+        except Exception as e:
+            error_msg = f'Close order failed: {str(e)}'
+            print(f"[ERROR] Failed to place close order: {e}")
+            return {
+                'success': False,
+                'order_id': None,
+                'message': error_msg
+            }
+
     def place_order(self, symbol: str, side: str, amount: float, 
                    order_type: str = 'market', price: float = None, 
                    leverage: int = 1) -> Dict:
@@ -370,13 +481,16 @@ class OKXClient:
         try:
             endpoint = '/api/v5/trade/order'
             
+            # Adjust order size to meet instrument requirements
+            adjusted_amount = self.adjust_order_size(symbol, amount)
+            
             # Prepare order data for long_short_mode
             order_data = {
                 'instId': symbol,
                 'tdMode': 'cross',  # Cross margin mode
                 'side': 'buy' if side.lower() in ['buy', 'long'] else 'sell',
                 'ordType': order_type,
-                'sz': str(amount),
+                'sz': str(adjusted_amount),
                 'posSide': 'long' if side.lower() in ['buy', 'long'] else 'short'  # Required for long_short_mode
             }
             
@@ -407,13 +521,16 @@ class OKXClient:
                         'success': True,
                         'order_id': order_info.get('ordId'),
                         'client_order_id': order_info.get('clOrdId'),
-                        'message': 'Order placed successfully'
+                        'message': 'Order placed successfully',
+                        'original_amount': amount,
+                        'adjusted_amount': adjusted_amount
                     }
                     print(f"[SUCCESS] OKX order placed: {order_result}")
                 else:
+                    error_code = order_info.get('sCode', 'Unknown')
                     error_msg = order_info.get('sMsg', 'Order failed')
-                    order_result['message'] = error_msg
-                    print(f"[ERROR] OKX order failed: {error_msg}")
+                    order_result['message'] = f"Order Error {error_code}: {error_msg}"
+                    print(f"[ERROR] OKX order failed - Code: {error_code}, Message: {error_msg}")
             else:
                 print(f"[ERROR] Invalid OKX response format: {response}")
             
@@ -542,14 +659,19 @@ class OKXClient:
                     'message': 'Position not found'
                 }
             
-            # Place opposite order to close position
-            close_side = 'sell' if target_position['side'] == 'long' else 'buy'
+            # For closing positions, we need to use the correct posSide
+            position_side = target_position['side']  # 'long' or 'short'
+            position_size = abs(float(target_position['size']))
             
-            return self.place_order(
+            # Place close order with correct parameters
+            close_side = 'sell' if position_side == 'long' else 'buy'
+            
+            # Use specialized close order method
+            return self._place_close_order(
                 symbol=symbol,
                 side=close_side,
-                amount=target_position['size'],
-                order_type='market'
+                amount=position_size,
+                position_side=position_side
             )
             
         except Exception as e:

@@ -179,7 +179,11 @@ def add_model():
         trading_frequency=int(data.get('trading_frequency', 180)),
         trading_coins=data.get('trading_coins', 'BTC,ETH,SOL,BNB,XRP,DOGE'),
         auto_trading_enabled=bool(data.get('auto_trading_enabled', True)),
-        system_prompt=data.get('system_prompt', '')
+        system_prompt=data.get('system_prompt', ''),
+        stop_loss_enabled=bool(data.get('stop_loss_enabled', False)),
+        stop_loss_percentage=float(data.get('stop_loss_percentage', 5.0)),
+        take_profit_enabled=bool(data.get('take_profit_enabled', False)),
+        take_profit_percentage=float(data.get('take_profit_percentage', 15.0))
     )
     
     try:
@@ -236,7 +240,11 @@ def update_model(model_id):
             trading_frequency=int(data.get('trading_frequency', 180)),
             trading_coins=data.get('trading_coins', 'BTC,ETH,SOL,BNB,XRP,DOGE'),
             auto_trading_enabled=bool(data.get('auto_trading_enabled', True)),
-            system_prompt=data.get('system_prompt', '')
+            system_prompt=data.get('system_prompt', ''),
+            stop_loss_enabled=bool(data.get('stop_loss_enabled', False)),
+            stop_loss_percentage=float(data.get('stop_loss_percentage', 5.0)),
+            take_profit_enabled=bool(data.get('take_profit_enabled', False)),
+            take_profit_percentage=float(data.get('take_profit_percentage', 15.0))
         )
         
         if not success:
@@ -298,6 +306,44 @@ def get_market_prices():
     coins = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE']
     prices = market_fetcher.get_current_prices(coins)
     return jsonify(prices)
+
+@app.route('/api/market/sources/status', methods=['GET'])
+def get_data_sources_status():
+    """Get status of all market data sources"""
+    try:
+        status = market_fetcher.get_data_source_status()
+        return jsonify({
+            'sources': status,
+            'timestamp': time.time()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/market/sources/test', methods=['GET'])
+def test_data_sources():
+    """Test all market data sources with sample requests"""
+    try:
+        test_coin = request.args.get('coin', 'BTC')
+        results = market_fetcher.test_all_sources(test_coin)
+        return jsonify({
+            'test_coin': test_coin,
+            'results': results,
+            'timestamp': time.time()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/market/config', methods=['GET'])
+def get_market_config():
+    """Get current market data API configuration"""
+    try:
+        config_info = market_fetcher.get_api_config_info()
+        return jsonify({
+            'config': config_info,
+            'timestamp': time.time()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/okx/validate', methods=['POST'])
 def validate_okx_configuration():
@@ -536,4 +582,4 @@ if __name__ == '__main__':
     print("Press Ctrl+C to stop")
     print("=" * 60 + "\n")
     
-    app.run(debug=False, host='0.0.0.0', port=5000, use_reloader=False)
+    app.run(debug=False, host='0.0.0.0', port=5001, use_reloader=False)

@@ -57,6 +57,10 @@ class Database:
                 trading_coins TEXT DEFAULT 'BTC,ETH,SOL,BNB,XRP,DOGE',
                 auto_trading_enabled BOOLEAN DEFAULT 1,
                 system_prompt TEXT DEFAULT '',
+                stop_loss_enabled BOOLEAN DEFAULT 0,
+                stop_loss_percentage REAL DEFAULT 5.0,
+                take_profit_enabled BOOLEAN DEFAULT 0,
+                take_profit_percentage REAL DEFAULT 15.0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -126,6 +130,9 @@ class Database:
         # Database migration: Add new trading configuration fields
         self._migrate_trading_config_fields(cursor)
         
+        # Database migration: Add stop loss/take profit configuration fields
+        self._migrate_stop_loss_take_profit_fields(cursor)
+        
         conn.commit()
         conn.close()
     
@@ -166,6 +173,25 @@ class Database:
                 cursor.execute('ALTER TABLE models ADD COLUMN system_prompt TEXT DEFAULT ""')
         except Exception as e:
             print(f"[INFO] Trading config fields migration completed or not needed: {e}")
+    
+    def _migrate_stop_loss_take_profit_fields(self, cursor):
+        """Migrate database to add stop loss/take profit configuration fields"""
+        try:
+            # Check if stop loss/take profit fields already exist
+            cursor.execute("PRAGMA table_info(models)")
+            columns = [column[1] for column in cursor.fetchall()]
+            
+            # Add missing stop loss/take profit configuration fields
+            if 'stop_loss_enabled' not in columns:
+                cursor.execute('ALTER TABLE models ADD COLUMN stop_loss_enabled BOOLEAN DEFAULT 0')
+            if 'stop_loss_percentage' not in columns:
+                cursor.execute('ALTER TABLE models ADD COLUMN stop_loss_percentage REAL DEFAULT 5.0')
+            if 'take_profit_enabled' not in columns:
+                cursor.execute('ALTER TABLE models ADD COLUMN take_profit_enabled BOOLEAN DEFAULT 0')
+            if 'take_profit_percentage' not in columns:
+                cursor.execute('ALTER TABLE models ADD COLUMN take_profit_percentage REAL DEFAULT 15.0')
+        except Exception as e:
+            print(f"[INFO] Stop loss/take profit fields migration completed or not needed: {e}")
     
     def _get_okx_client(self, model_id: int) -> Optional['OKXClient']:
         """Get OKX client for a model if configured"""
@@ -234,7 +260,9 @@ class Database:
                    okx_api_key: str = '', okx_secret_key: str = '',
                    okx_passphrase: str = '', okx_sandbox_mode: bool = True,
                    trading_frequency: int = 180, trading_coins: str = 'BTC,ETH,SOL,BNB,XRP,DOGE',
-                   auto_trading_enabled: bool = True, system_prompt: str = '') -> int:
+                   auto_trading_enabled: bool = True, system_prompt: str = '',
+                   stop_loss_enabled: bool = False, stop_loss_percentage: float = 5.0,
+                   take_profit_enabled: bool = False, take_profit_percentage: float = 15.0) -> int:
         """Add new trading model"""
         # Encrypt OKX credentials if provided
         encrypted_okx_api_key = okx_api_key
@@ -259,11 +287,13 @@ class Database:
         cursor.execute('''
             INSERT INTO models (name, api_key, api_url, model_name, initial_capital,
                               okx_api_key, okx_secret_key, okx_passphrase, okx_sandbox_mode,
-                              trading_frequency, trading_coins, auto_trading_enabled, system_prompt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              trading_frequency, trading_coins, auto_trading_enabled, system_prompt,
+                              stop_loss_enabled, stop_loss_percentage, take_profit_enabled, take_profit_percentage)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (name, api_key, api_url, model_name, initial_capital,
               encrypted_okx_api_key, encrypted_okx_secret_key, encrypted_okx_passphrase, okx_sandbox_mode,
-              trading_frequency, trading_coins, auto_trading_enabled, system_prompt))
+              trading_frequency, trading_coins, auto_trading_enabled, system_prompt,
+              stop_loss_enabled, stop_loss_percentage, take_profit_enabled, take_profit_percentage))
         model_id = cursor.lastrowid
         conn.commit()
         conn.close()
@@ -340,7 +370,9 @@ class Database:
                     okx_api_key: str = '', okx_secret_key: str = '', 
                     okx_passphrase: str = '', okx_sandbox_mode: bool = True,
                     trading_frequency: int = 180, trading_coins: str = 'BTC,ETH,SOL,BNB,XRP,DOGE',
-                    auto_trading_enabled: bool = True, system_prompt: str = '') -> bool:
+                    auto_trading_enabled: bool = True, system_prompt: str = '',
+                    stop_loss_enabled: bool = False, stop_loss_percentage: float = 5.0,
+                    take_profit_enabled: bool = False, take_profit_percentage: float = 15.0) -> bool:
         """Update existing model"""
         try:
             # Check if model exists
@@ -369,12 +401,13 @@ class Database:
                 UPDATE models SET 
                     name = ?, api_key = ?, api_url = ?, model_name = ?, initial_capital = ?,
                     okx_api_key = ?, okx_secret_key = ?, okx_passphrase = ?, okx_sandbox_mode = ?,
-                    trading_frequency = ?, trading_coins = ?, auto_trading_enabled = ?, system_prompt = ?
+                    trading_frequency = ?, trading_coins = ?, auto_trading_enabled = ?, system_prompt = ?,
+                    stop_loss_enabled = ?, stop_loss_percentage = ?, take_profit_enabled = ?, take_profit_percentage = ?
                 WHERE id = ?
             ''', (name, api_key, api_url, model_name, initial_capital,
                   encrypted_okx_api_key, encrypted_okx_secret_key, encrypted_okx_passphrase, 
                   okx_sandbox_mode, trading_frequency, trading_coins, auto_trading_enabled, 
-                  system_prompt, model_id))
+                  system_prompt, stop_loss_enabled, stop_loss_percentage, take_profit_enabled, take_profit_percentage, model_id))
             
             updated = cursor.rowcount > 0
             conn.commit()
