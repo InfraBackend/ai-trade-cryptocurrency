@@ -191,43 +191,90 @@ class TradingApp {
   }
 
   updateStats(portfolio) {
-    const stats = [
-      {
-        value: portfolio.total_value || 0,
-        class:
-          portfolio.total_value > portfolio.initial_capital
-            ? "positive"
-            : portfolio.total_value < portfolio.initial_capital
-            ? "negative"
-            : "",
-      },
-      { value: portfolio.cash || 0, class: "" },
-      {
-        value: portfolio.realized_pnl || 0,
-        class:
-          portfolio.realized_pnl > 0
-            ? "positive"
-            : portfolio.realized_pnl < 0
-            ? "negative"
-            : "",
-      },
-      {
-        value: portfolio.unrealized_pnl || 0,
-        class:
-          portfolio.unrealized_pnl > 0
-            ? "positive"
-            : portfolio.unrealized_pnl < 0
-            ? "negative"
-            : "",
-      },
-    ];
+    if (!portfolio) {
+      console.warn("Portfolio data is null or undefined");
+      return;
+    }
 
-    document.querySelectorAll(".stat-value").forEach((el, index) => {
-      if (stats[index]) {
-        el.textContent = `$${Math.abs(stats[index].value).toFixed(2)}`;
-        el.className = `stat-value ${stats[index].class}`;
-      }
-    });
+    const totalValue = portfolio.total_value || 0;
+    const initialCapital = portfolio.initial_capital || 1;
+    const cash = portfolio.cash || 0;
+    const positionsValue = portfolio.positions_value || 0;
+    const realizedPnl = portfolio.realized_pnl || 0;
+    const unrealizedPnl = portfolio.unrealized_pnl || 0;
+
+    // 计算各种百分比
+    const totalReturn = ((totalValue - initialCapital) / initialCapital) * 100;
+    // 现金占比和保证金占比应该相加等于100%（或接近100%）
+    const cashPercentage = totalValue > 0 ? (cash / totalValue) * 100 : 0;
+    const marginPercentage = totalValue > 0 ? (positionsValue / totalValue) * 100 : 0;
+    const realizedPnlPercent = (realizedPnl / initialCapital) * 100;
+    const unrealizedPnlPercent = (unrealizedPnl / initialCapital) * 100;
+
+    // 1. 账户总值
+    const accountValueEl = document.getElementById("accountValue");
+    const accountChangeEl = document.getElementById("accountChange");
+    const totalReturnPercentEl = document.getElementById("totalReturnPercent");
+
+    if (accountValueEl) {
+      accountValueEl.textContent = `$${totalValue.toFixed(2)}`;
+      accountValueEl.className = `stat-value ${totalReturn > 0 ? "positive" : totalReturn < 0 ? "negative" : ""}`;
+    }
+
+    if (accountChangeEl) {
+      accountChangeEl.textContent = `${totalReturn > 0 ? "+" : ""}${totalReturn.toFixed(2)}%`;
+      accountChangeEl.className = `stat-change ${totalReturn > 0 ? "positive" : totalReturn < 0 ? "negative" : ""}`;
+    }
+
+    if (totalReturnPercentEl) {
+      totalReturnPercentEl.textContent = `${totalReturn > 0 ? "+" : ""}${totalReturn.toFixed(2)}%`;
+      totalReturnPercentEl.className = `detail-value ${totalReturn > 0 ? "positive" : totalReturn < 0 ? "negative" : ""}`;
+    }
+
+    // 2. 可用现金
+    const cashValueEl = document.getElementById("cashValue");
+    const cashPercentageEl = document.getElementById("cashPercentage");
+    const positionPercentEl = document.getElementById("positionPercent");
+
+    if (cashValueEl) {
+      cashValueEl.textContent = `$${cash.toFixed(2)}`;
+    }
+
+    if (cashPercentageEl) {
+      cashPercentageEl.textContent = `现金占比: ${cashPercentage.toFixed(1)}%`;
+    }
+
+    if (positionPercentEl) {
+      positionPercentEl.textContent = `${marginPercentage.toFixed(1)}%`;
+    }
+
+    // 3. 已实现盈亏
+    const realizedPnlEl = document.getElementById("realizedPnl");
+    const realizedPnlPercentEl = document.getElementById("realizedPnlPercent");
+
+    if (realizedPnlEl) {
+      realizedPnlEl.textContent = `${realizedPnl >= 0 ? "+" : ""}$${Math.abs(realizedPnl).toFixed(2)}`;
+      realizedPnlEl.className = `stat-value pnl-value ${realizedPnl > 0 ? "positive" : realizedPnl < 0 ? "negative" : ""}`;
+    }
+
+    if (realizedPnlPercentEl) {
+      realizedPnlPercentEl.textContent = `${realizedPnlPercent >= 0 ? "+" : ""}${realizedPnlPercent.toFixed(2)}%`;
+      realizedPnlPercentEl.className = `stat-percentage pnl-percentage ${realizedPnl > 0 ? "positive" : realizedPnl < 0 ? "negative" : ""}`;
+    }
+
+    // 4. 未实现盈亏
+    const unrealizedPnlEl = document.getElementById("unrealizedPnl");
+    const unrealizedPnlPercentEl = document.getElementById("unrealizedPnlPercent");
+
+    if (unrealizedPnlEl) {
+      unrealizedPnlEl.textContent = `${unrealizedPnl >= 0 ? "+" : ""}$${Math.abs(unrealizedPnl).toFixed(2)}`;
+      unrealizedPnlEl.className = `stat-value pnl-value ${unrealizedPnl > 0 ? "positive" : unrealizedPnl < 0 ? "negative" : ""}`;
+    }
+
+    if (unrealizedPnlPercentEl) {
+      unrealizedPnlPercentEl.textContent = `${unrealizedPnlPercent >= 0 ? "+" : ""}${unrealizedPnlPercent.toFixed(2)}%`;
+      unrealizedPnlPercentEl.className = `stat-percentage pnl-percentage ${unrealizedPnl > 0 ? "positive" : unrealizedPnl < 0 ? "negative" : ""}`;
+    }
   }
 
   updateChart(history, currentValue) {

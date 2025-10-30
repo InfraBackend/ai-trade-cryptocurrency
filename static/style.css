@@ -378,27 +378,29 @@ body {
 .stat-main {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
+  margin-bottom: 4px;
 }
 
 .stat-value {
   font-size: 28px;
   font-weight: 700;
   color: var(--text-1);
-  line-height: 1.2;
+  line-height: 1.1;
+}
+
+.stat-value.positive {
+  color: var(--success);
+}
+
+.stat-value.negative {
+  color: var(--danger);
 }
 
 .stat-change {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.stat-change::before {
-  content: "📈";
-  font-size: 12px;
+  display: inline-block;
 }
 
 .stat-change.positive {
@@ -438,14 +440,14 @@ body {
 }
 
 .stat-percentage {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-3);
-  margin-top: 2px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
 }
 
 .pnl-percentage {
-  font-weight: 600;
+  font-weight: 700;
+  font-size: 14px;
 }
 
 .pnl-percentage.positive {
@@ -456,52 +458,34 @@ body {
   color: var(--danger);
 }
 
-.pnl-value.positive::before {
-  content: "+";
-}
-
-.pnl-value.negative::before {
-  content: "-";
-}
-
 .pnl-value {
-  position: relative;
-}
-
-.stat-percentage {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-3);
-}
-
-.pnl-value {
-  font-size: 32px;
+  font-size: 28px;
   font-weight: 700;
 }
 
 .pnl-value.positive {
-  color: #ff4757;
+  color: var(--success);
 }
 
 .pnl-value.negative {
-  color: var(--success);
+  color: var(--danger);
 }
 
 /* Specific card styles */
 .account-value .stat-icon {
-  color: var(--text-2);
-}
-
-.cash-available .stat-icon {
   color: var(--primary);
 }
 
+.cash-available .stat-icon {
+  color: #0fc6c2;
+}
+
 .realized-pnl .stat-icon {
-  color: #ff4757;
+  color: var(--success);
 }
 
 .unrealized-pnl .stat-icon {
-  color: #ff4757;
+  color: var(--warning);
 }
 
 .text-primary {

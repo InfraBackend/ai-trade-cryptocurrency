@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import Dict
 import json
+import time
 
 # Import OKX client (optional dependency)
 try:
@@ -65,11 +66,16 @@ class TradingEngine:
     def execute_trading_cycle(self) -> Dict:
         try:
             market_state = self._get_market_state()
-            
+
             current_prices = {coin: market_state[coin]['price'] for coin in market_state}
-            
+
+            # 🔄 STEP 0: Sync positions with exchange (before any operations)
+            # 确保数据库持仓与OKX实际持仓一致
+            if self.okx_client:
+                self.sync_positions_with_exchange()
+
             portfolio = self.db.get_portfolio(self.model_id, current_prices)
-            
+
             # 🚨 STEP 1: Check for stop loss and take profit triggers
             stop_loss_actions = []
             if ENHANCED_FEATURES and self.risk_manager:
@@ -195,28 +201,39 @@ class TradingEngine:
                 
                 # Execute close position instead of placing a separate order
                 close_result = self.okx_client.close_position(symbol=symbol)
-                
+
                 if close_result['success']:
-                    # Calculate actual P&L for the closed position
                     current_price = current_prices.get(coin, 0)
                     entry_price = float(target_position.get('avg_price', current_price))
                     position_side = target_position.get('side', 'long')
-                    
-                    # Calculate P&L based on original position side
+
+                    # Check if position was already closed
+                    if close_result.get('already_closed'):
+                        # Position already closed - just clean up database
+                        self.db.close_position(self.model_id, coin, position_side)
+                        print(f"[INFO] Cleaned up phantom position for {coin} - already closed on OKX")
+
+                        return {
+                            'success': True,
+                            'method': 'okx',
+                            'message': f'{action_type} - position already closed on OKX, database cleaned up'
+                        }
+
+                    # Position was actually closed now - calculate P&L
                     if position_side == 'long':
                         pnl = (current_price - entry_price) * actual_quantity
                     else:  # short position
                         pnl = (entry_price - current_price) * actual_quantity
-                    
+
                     # Close position in database
                     self.db.close_position(self.model_id, coin, position_side)
-                    
+
                     # Record the trade with actual values and correct side
                     self.db.add_trade(
                         self.model_id, coin, 'close_position', actual_quantity,
                         current_price, 1, position_side, pnl=pnl
                     )
-                    
+
                     return {
                         'success': True,
                         'method': 'okx',
@@ -227,8 +244,8 @@ class TradingEngine:
                     return {
                         'success': False,
                         'method': 'okx',
-                            'error': order_result.get('message', 'Unknown error')
-                        }
+                        'error': close_result.get('message', 'Unknown error')
+                    }
             
             # Fallback to simulation
             current_price = current_prices.get(coin, 0)
@@ -541,34 +558,150 @@ class TradingEngine:
             'message': f'Simulated Short {quantity:.4f} {coin} @ ${price:.2f}'
         }
     
-    def sync_positions_with_exchange(self):
-        """Sync database positions with actual exchange positions"""
+    def sync_positions_with_exchange(self, force: bool = False):
+        """
+        完整的双向持仓同步机制
+
+        处理三种情况：
+        1. 幻影持仓：数据库有但OKX没有 → 清理数据库
+        2. 反向幻影：OKX有但数据库没有 → 添加到数据库
+        3. 数量不一致：更新数据库为OKX的实际数量
+
+        Args:
+            force: 强制同步，否则使用缓存（60秒内只同步一次）
+        """
         if not self.okx_client:
             return
-        
+
+        # 同步频率控制（避免过于频繁）
+        if not force:
+            current_time = time.time()
+            last_sync = getattr(self, '_last_sync_time', 0)
+            if current_time - last_sync < 60:  # 60秒内不重复同步
+                return
+            self._last_sync_time = current_time
+
         try:
-            # Get actual positions from OKX
+            print(f"\n{'='*60}")
+            print(f"🔄 开始持仓同步检查 - 模型ID: {self.model_id}")
+            print(f"{'='*60}")
+
+            # 获取OKX实际持仓
             okx_positions = self.okx_client.get_positions()
             okx_active_positions = {}
-            
+
             for pos in okx_positions:
-                if abs(float(pos.get('size', 0))) > 0:  # Only active positions
+                size = abs(float(pos.get('size', 0)))
+                if size > 0:  # 只记录有持仓的
                     symbol = pos['symbol']
                     coin = symbol.replace('-USDT-SWAP', '')
                     okx_active_positions[coin] = pos
-            
-            # Get database positions
+                    print(f"📍 OKX持仓: {coin} - {pos['side']} - 数量: {size}")
+
+            # 获取数据库持仓
             portfolio = self.db.get_portfolio(self.model_id)
             db_positions = {pos['coin']: pos for pos in portfolio.get('positions', [])}
-            
-            # Clean up phantom positions (in database but not on exchange)
+
+            if db_positions:
+                print(f"\n📊 数据库持仓:")
+                for coin, pos in db_positions.items():
+                    print(f"  {coin} - {pos['side']} - 数量: {pos['quantity']}")
+            else:
+                print(f"\n📊 数据库无持仓")
+
+            sync_actions = []
+
+            # 1. 检查幻影持仓（数据库有但OKX没有）
             for coin, db_pos in db_positions.items():
                 if coin not in okx_active_positions:
-                    print(f"🧹 Cleaning up phantom position: {coin}")
+                    print(f"\n🧹 发现幻影持仓: {coin} ({db_pos['side']})")
+                    print(f"   → 数据库显示数量: {db_pos['quantity']}")
+                    print(f"   → OKX实际持仓: 无")
+                    print(f"   → 操作: 清理数据库记录")
+
                     self.db.close_position(self.model_id, coin, db_pos['side'])
-            
+                    sync_actions.append(f"清理幻影持仓: {coin}")
+
+            # 2. 检查反向幻影（OKX有但数据库没有）
+            for coin, okx_pos in okx_active_positions.items():
+                if coin not in db_positions:
+                    print(f"\n🔍 发现反向幻影: {coin} ({okx_pos['side']})")
+                    print(f"   → OKX实际持仓: {okx_pos['size']}")
+                    print(f"   → 数据库记录: 无")
+                    print(f"   → 操作: 添加到数据库")
+
+                    # 添加到数据库
+                    self.db.update_position(
+                        self.model_id,
+                        coin,
+                        float(okx_pos['size']),
+                        float(okx_pos['avg_price']),
+                        int(float(okx_pos.get('leverage', 1))),
+                        okx_pos['side']
+                    )
+                    sync_actions.append(f"添加反向幻影: {coin}")
+
+                elif db_positions[coin]['side'] != okx_pos['side']:
+                    # 持仓方向不一致（这种情况比较严重）
+                    print(f"\n⚠️  持仓方向不一致: {coin}")
+                    print(f"   → 数据库方向: {db_positions[coin]['side']}")
+                    print(f"   → OKX方向: {okx_pos['side']}")
+                    print(f"   → 操作: 以OKX为准，更新数据库")
+
+                    # 先清理旧的
+                    self.db.close_position(self.model_id, coin, db_positions[coin]['side'])
+                    # 再添加新的
+                    self.db.update_position(
+                        self.model_id,
+                        coin,
+                        float(okx_pos['size']),
+                        float(okx_pos['avg_price']),
+                        int(float(okx_pos.get('leverage', 1))),
+                        okx_pos['side']
+                    )
+                    sync_actions.append(f"修正方向不一致: {coin}")
+
+            # 3. 检查数量不一致
+            for coin in set(db_positions.keys()) & set(okx_active_positions.keys()):
+                db_pos = db_positions[coin]
+                okx_pos = okx_active_positions[coin]
+
+                db_qty = float(db_pos['quantity'])
+                okx_qty = float(okx_pos['size'])
+
+                # 允许0.01%的误差
+                if abs(db_qty - okx_qty) / max(db_qty, okx_qty) > 0.0001:
+                    print(f"\n📐 数量不一致: {coin}")
+                    print(f"   → 数据库数量: {db_qty}")
+                    print(f"   → OKX数量: {okx_qty}")
+                    print(f"   → 差异: {abs(db_qty - okx_qty)}")
+                    print(f"   → 操作: 更新为OKX实际数量")
+
+                    # 更新为OKX的实际数量
+                    self.db.update_position(
+                        self.model_id,
+                        coin,
+                        okx_qty,
+                        float(okx_pos['avg_price']),
+                        int(float(okx_pos.get('leverage', 1))),
+                        okx_pos['side']
+                    )
+                    sync_actions.append(f"更新数量: {coin} ({db_qty:.4f} → {okx_qty:.4f})")
+
+            # 同步总结
+            print(f"\n{'='*60}")
+            if sync_actions:
+                print(f"✅ 同步完成，执行了 {len(sync_actions)} 个操作:")
+                for action in sync_actions:
+                    print(f"   • {action}")
+            else:
+                print(f"✅ 同步完成，数据库与OKX持仓完全一致")
+            print(f"{'='*60}\n")
+
         except Exception as e:
-            print(f"Position sync error: {e}")
+            print(f"❌ 持仓同步错误: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _execute_close(self, coin: str, decision: Dict, market_state: Dict, 
                       portfolio: Dict) -> Dict:
@@ -638,30 +771,45 @@ class TradingEngine:
             
             # Close position on OKX
             close_result = self.okx_client.close_position(symbol=symbol)
-            
+
             if close_result['success']:
                 current_price = market_state[coin]['price']
-                
-                # Get actual values from the position that was closed
+                position_side = target_position.get('side', 'long')
+
+                # Check if position was already closed
+                if close_result.get('already_closed'):
+                    # Position already closed - just clean up database
+                    self.db.close_position(self.model_id, coin, position_side)
+                    print(f"[INFO] Cleaned up phantom position for {coin} - already closed on OKX")
+
+                    return {
+                        'coin': coin,
+                        'signal': 'close_position',
+                        'quantity': 0,
+                        'price': current_price,
+                        'pnl': 0,
+                        'message': f'Position for {coin} already closed on OKX, database cleaned up'
+                    }
+
+                # Position was actually closed now - calculate P&L
                 closed_quantity = position_size
                 entry_price = float(target_position.get('avg_price', current_price))
-                position_side = target_position.get('side', 'long')
-                
+
                 # Calculate P&L
                 if position_side == 'long':
                     pnl = (current_price - entry_price) * closed_quantity
                 else:
                     pnl = (entry_price - current_price) * closed_quantity
-                
+
                 # Close position in database
                 self.db.close_position(self.model_id, coin, position_side)
-                
+
                 # Record trade in database with actual values
                 self.db.add_trade(
                     self.model_id, coin, 'close_position', closed_quantity,
                     current_price, 1, position_side, pnl=pnl
                 )
-                
+
                 return {
                     'coin': coin,
                     'signal': 'close_position',

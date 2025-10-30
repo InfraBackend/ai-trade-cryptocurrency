@@ -10,20 +10,66 @@ class AITrader:
     
     def make_decision(self, market_state: Dict, portfolio: Dict, 
                      account_info: Dict) -> Dict:
+        """生成AI交易决策，带改进的错误处理和日志"""
+        import time
+        
+        start_time = time.time()
+        
         try:
+            print(f"[INFO] 开始AI决策生成 (市场数据: {len(market_state)}个币种)")
+            
             prompt = self._build_prompt(market_state, portfolio, account_info)
+            print(f"[INFO] 提示词构建完成 (长度: {len(prompt)}字符)")
+            
             response = self._call_llm(prompt)
+            print(f"[INFO] AI响应获取成功 (长度: {len(response)}字符)")
+            
             decisions = self._parse_response(response)
             
             # Validate decisions format
             if not decisions or not isinstance(decisions, dict):
                 print("[WARNING] Invalid AI response format, using default hold strategy")
+                print(f"[DEBUG] Response content: {response[:200]}...")
                 return self._get_default_decisions(market_state)
+            
+            elapsed_time = time.time() - start_time
+            print(f"[SUCCESS] AI决策生成成功 (耗时: {elapsed_time:.2f}秒, 决策: {len(decisions)}个)")
+            
+            # 记录决策质量
+            ai_decisions = 0
+            hold_decisions = 0
+            action_decisions = 0
+            
+            for coin, decision in decisions.items():
+                if isinstance(decision, dict):
+                    signal = decision.get('signal', 'hold')
+                    if signal == 'hold':
+                        hold_decisions += 1
+                    else:
+                        action_decisions += 1
+                    ai_decisions += 1
+            
+            print(f"[INFO] 决策分布: {action_decisions}个操作, {hold_decisions}个持有")
             
             return decisions
             
         except Exception as e:
-            print(f"[WARNING] AI decision failed: {e}")
+            elapsed_time = time.time() - start_time
+            error_str = str(e).lower()
+            
+            # 分类错误类型
+            if "timeout" in error_str:
+                print(f"[ERROR] AI决策超时 (耗时: {elapsed_time:.2f}秒): {e}")
+            elif "connection" in error_str:
+                print(f"[ERROR] AI连接失败 (耗时: {elapsed_time:.2f}秒): {e}")
+            elif "401" in error_str or "403" in error_str:
+                print(f"[ERROR] AI认证失败: {e}")
+            elif "429" in error_str:
+                print(f"[ERROR] AI限流: {e}")
+            else:
+                print(f"[ERROR] AI决策失败 (耗时: {elapsed_time:.2f}秒): {e}")
+            
+            print(f"[INFO] 使用默认持有策略")
             return self._get_default_decisions(market_state)
     
     def _get_default_decisions(self, market_state: Dict) -> Dict:
@@ -314,110 +360,153 @@ Analyze and output JSON only.
         return json.dumps(tpsl_orders, indent=2, ensure_ascii=False)
     
     def _call_llm(self, prompt: str) -> str:
-        try:
-            # 使用requests直接调用API，完全绕过代理设置
-            import requests
-            import json
-            import os
-            
-            # 临时保存并清除所有代理相关的环境变量
-            proxy_vars = [
-                'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
-                'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy'
-            ]
-            
-            saved_proxies = {}
-            for var in proxy_vars:
-                if var in os.environ:
-                    saved_proxies[var] = os.environ[var]
-                    del os.environ[var]
-            
+        """调用LLM API，带重试机制和改进的错误处理"""
+        import requests
+        import json
+        import os
+        import time
+        
+        # 重试配置
+        max_retries = 3
+        base_timeout = 45  # 增加基础超时时间
+        retry_delays = [1, 3, 5]  # 重试间隔
+        
+        for attempt in range(max_retries):
             try:
-                base_url = self.api_url.rstrip('/')
-                if not base_url.endswith('/v1'):
-                    if '/v1' in base_url:
-                        base_url = base_url.split('/v1')[0] + '/v1'
-                    else:
-                        base_url = base_url + '/v1'
+                print(f"[INFO] AI API调用尝试 {attempt + 1}/{max_retries}")
                 
-                api_url = f"{base_url}/chat/completions"
+                # 临时保存并清除所有代理相关的环境变量
+                proxy_vars = [
+                    'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+                    'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy'
+                ]
                 
-                headers = {
-                    'Authorization': f'Bearer {self.api_key}',
-                    'Content-Type': 'application/json',
-                    'User-Agent': 'AI-Trading-Bot/1.0'
-                }
+                saved_proxies = {}
+                for var in proxy_vars:
+                    if var in os.environ:
+                        saved_proxies[var] = os.environ[var]
+                        del os.environ[var]
                 
-                payload = {
-                    "model": self.model_name,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "You are a professional cryptocurrency trader. Output JSON format only."
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ],
-                    "temperature": 0.7,
-                    "max_tokens": 2000
-                }
-                
-                # 创建一个新的session，明确禁用代理
-                session = requests.Session()
-                session.proxies = {}  # 清空代理设置
-                
-                response = session.post(
-                    api_url,
-                    headers=headers,
-                    json=payload,
-                    timeout=30
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    return result['choices'][0]['message']['content']
-                else:
-                    raise Exception(f"API request failed with status {response.status_code}: {response.text[:200]}")
+                try:
+                    base_url = self.api_url.rstrip('/')
+                    if not base_url.endswith('/v1'):
+                        if '/v1' in base_url:
+                            base_url = base_url.split('/v1')[0] + '/v1'
+                        else:
+                            base_url = base_url + '/v1'
                     
-            finally:
-                # 恢复代理环境变量
-                for var, value in saved_proxies.items():
-                    os.environ[var] = value
+                    api_url = f"{base_url}/chat/completions"
+                    
+                    headers = {
+                        'Authorization': f'Bearer {self.api_key}',
+                        'Content-Type': 'application/json',
+                        'User-Agent': 'AI-Trading-Bot/1.0'
+                    }
+                    
+                    payload = {
+                        "model": self.model_name,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "You are a professional cryptocurrency trader. Output JSON format only."
+                            },
+                            {
+                                "role": "user",
+                                "content": prompt
+                            }
+                        ],
+                        "temperature": 0.7,
+                        "max_tokens": 2000
+                    }
+                    
+                    # 创建一个新的session，明确禁用代理
+                    session = requests.Session()
+                    session.proxies = {}  # 清空代理设置
+                    
+                    # 动态调整超时时间
+                    timeout = base_timeout + (attempt * 15)  # 每次重试增加15秒
+                    
+                    start_time = time.time()
+                    response = session.post(
+                        api_url,
+                        headers=headers,
+                        json=payload,
+                        timeout=timeout
+                    )
+                    elapsed_time = time.time() - start_time
+                    
+                    print(f"[INFO] API响应时间: {elapsed_time:.2f}秒")
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        content = result['choices'][0]['message']['content']
+                        print(f"[SUCCESS] AI API调用成功 (尝试 {attempt + 1})")
+                        return content
+                    else:
+                        error_msg = f"API request failed with status {response.status_code}: {response.text[:200]}"
+                        print(f"[ERROR] {error_msg}")
+                        
+                        # 对于某些错误码，不进行重试
+                        if response.status_code in [401, 403, 429]:
+                            if response.status_code == 429:
+                                print(f"[WARNING] API限流，等待更长时间后重试")
+                                if attempt < max_retries - 1:
+                                    time.sleep(retry_delays[attempt] * 3)  # 限流时等待更长时间
+                                    continue
+                            raise Exception(error_msg)
+                        
+                        if attempt == max_retries - 1:
+                            raise Exception(error_msg)
+                        
+                finally:
+                    # 恢复代理环境变量
+                    for var, value in saved_proxies.items():
+                        os.environ[var] = value
                 
-        except requests.exceptions.Timeout:
-            raise Exception("API request timeout")
-        except requests.exceptions.ConnectionError as e:
-            raise Exception(f"API connection failed: {str(e)}")
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"API request error: {str(e)}")
-        except json.JSONDecodeError as e:
-            raise Exception(f"API response parsing failed: {str(e)}")
-        except KeyError as e:
-            raise Exception(f"API response format error: missing {str(e)}")
-        except Exception as e:
-            raise Exception(f"Unexpected error: {str(e)}")
-            
-        except Exception as e:
-            # Handle different types of errors gracefully
-            error_str = str(e).lower()
-            if "timeout" in error_str or "timed out" in error_str:
-                error_msg = f"API request timeout: {str(e)}"
+            except requests.exceptions.Timeout:
+                error_msg = f"API request timeout (attempt {attempt + 1}, timeout: {timeout}s)"
                 print(f"[WARNING] {error_msg}")
-            elif "connection" in error_str:
-                error_msg = f"Network connection failed: {str(e)}"
-                print(f"[ERROR] {error_msg}")
-            elif "status" in error_str and "403" in error_str:
-                error_msg = f"API access forbidden (403): Check API key and permissions"
-                print(f"[ERROR] {error_msg}")
-            elif "status" in error_str and "401" in error_str:
-                error_msg = f"API authentication failed (401): Invalid API key"
-                print(f"[ERROR] {error_msg}")
-            else:
-                error_msg = f"LLM call failed: {str(e)}"
-                print(f"[ERROR] {error_msg}")
-            raise Exception(error_msg)
+                if attempt == max_retries - 1:
+                    raise Exception("API request timeout after retries")
+                
+            except requests.exceptions.ConnectionError as e:
+                error_msg = f"API connection failed (attempt {attempt + 1}): {str(e)}"
+                print(f"[WARNING] {error_msg}")
+                if attempt == max_retries - 1:
+                    raise Exception(f"API connection failed after retries: {str(e)}")
+                
+            except requests.exceptions.RequestException as e:
+                error_msg = f"API request error (attempt {attempt + 1}): {str(e)}"
+                print(f"[WARNING] {error_msg}")
+                if attempt == max_retries - 1:
+                    raise Exception(f"API request error after retries: {str(e)}")
+                
+            except json.JSONDecodeError as e:
+                error_msg = f"API response parsing failed (attempt {attempt + 1}): {str(e)}"
+                print(f"[WARNING] {error_msg}")
+                if attempt == max_retries - 1:
+                    raise Exception(f"API response parsing failed after retries: {str(e)}")
+                
+            except KeyError as e:
+                error_msg = f"API response format error (attempt {attempt + 1}): missing {str(e)}"
+                print(f"[WARNING] {error_msg}")
+                if attempt == max_retries - 1:
+                    raise Exception(f"API response format error after retries: missing {str(e)}")
+                
+            except Exception as e:
+                error_msg = f"Unexpected error (attempt {attempt + 1}): {str(e)}"
+                print(f"[WARNING] {error_msg}")
+                if attempt == max_retries - 1:
+                    raise Exception(f"Unexpected error after retries: {str(e)}")
+            
+            # 如果不是最后一次尝试，等待后重试
+            if attempt < max_retries - 1:
+                delay = retry_delays[attempt]
+                print(f"[INFO] 等待 {delay}秒后重试...")
+                time.sleep(delay)
+        
+        # 如果所有重试都失败了
+        raise Exception("All retry attempts failed")
     
     def _parse_response(self, response: str) -> Dict:
         response = response.strip()

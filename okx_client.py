@@ -30,24 +30,29 @@ class OKXClient:
         self.secret_key = secret_key
         self.passphrase = passphrase
         self.sandbox = sandbox
-        
+
         # API endpoints
         if sandbox:
             self.base_url = "https://www.okx.com"  # OKX sandbox uses same URL but different API keys
         else:
             self.base_url = "https://www.okx.com"  # Production URL
-        
+
         # Enhanced rate limiting
         self._last_request_time = {}
         self._request_counts = {}
         self._min_request_interval = 0.1  # 100ms between requests
         self._max_requests_per_second = 10  # OKX limit
         self._max_requests_per_minute = 600  # OKX limit
-        
+
         # Cache
         self._cache = {}
         self._cache_time = {}
         self._cache_duration = 5  # 5 seconds cache
+
+        # Account config cache (longer duration since it rarely changes)
+        self._account_config = None
+        self._account_config_time = 0
+        self._account_config_duration = 300  # 5 minutes cache
     
     def _get_timestamp(self) -> str:
         """Get ISO timestamp for OKX API requests"""
@@ -185,15 +190,29 @@ class OKXClient:
                 if 'code' in data and data['code'] != '0':
                     error_code = data['code']
                     error_msg = data.get('msg', 'Unknown OKX API error')
-                    
+
                     # Log detailed error information for debugging
                     print(f"[DEBUG] OKX API Error - Code: {error_code}, Message: {error_msg}")
                     print(f"[DEBUG] Full response: {json.dumps(data, indent=2)}")
-                    
+
+                    # Check for detailed error codes in data array (for code='1')
+                    detailed_error_code = None
+                    detailed_error_msg = None
+                    if 'data' in data and data['data'] and isinstance(data['data'], list):
+                        if len(data['data']) > 0 and 'sCode' in data['data'][0]:
+                            detailed_error_code = data['data'][0]['sCode']
+                            detailed_error_msg = data['data'][0].get('sMsg', '')
+                            print(f"[DEBUG] Detailed Error - sCode: {detailed_error_code}, sMsg: {detailed_error_msg}")
+
                     # Handle specific OKX error codes
                     if error_code == '1':
+                        # Check if this is error 51169 (position already closed)
+                        if detailed_error_code == '51169':
+                            # Position already closed - include error code in exception for upper layer handling
+                            raise Exception(f"OKX Error 51169: {detailed_error_msg}")
                         # Generic operation failed - usually parameter or permission issue
-                        raise Exception(f"OKX Operation Failed: {error_msg}. Check order parameters and account permissions.")
+                        error_detail = f" (Detail: {detailed_error_code} - {detailed_error_msg})" if detailed_error_code else ""
+                        raise Exception(f"OKX Operation Failed: {error_msg}{error_detail}")
                     elif error_code in ['50001', '50002', '50004']:
                         # Authentication/Permission errors - don't retry
                         raise Exception(f"OKX Auth Error {error_code}: {error_msg}")
@@ -247,13 +266,18 @@ class OKXClient:
                 time.sleep(2 ** attempt)
     
     def get_account_config(self) -> Dict:
-        """Get account configuration information"""
+        """Get account configuration information with caching"""
+        # Check cache first
+        current_time = time.time()
+        if self._account_config and (current_time - self._account_config_time < self._account_config_duration):
+            return self._account_config
+
         try:
             endpoint = '/api/v5/account/config'
             response = self._make_request('GET', endpoint)
-            
+
             config_data = {}
-            
+
             if 'data' in response and response['data']:
                 account_config = response['data'][0]
                 config_data = {
@@ -264,14 +288,22 @@ class OKXClient:
                     'uid': account_config.get('uid', ''),
                     'label': account_config.get('label', '')
                 }
-                
+
                 print(f"[INFO] OKX Account Config: {config_data}")
-            
+
+                # Cache the result
+                self._account_config = config_data
+                self._account_config_time = current_time
+
             return config_data
-            
+
         except Exception as e:
             print(f"[ERROR] Failed to get account config: {e}")
-            return {}
+            # Return cached config if available, otherwise return default
+            if self._account_config:
+                print(f"[INFO] Using cached account config due to error")
+                return self._account_config
+            return {'position_mode': 'long_short_mode'}  # Default to long_short_mode
     
     def get_account_balance(self) -> Dict:
         """Get account balance information"""
@@ -415,34 +447,45 @@ class OKXClient:
             return amount
 
     def _place_close_order(self, symbol: str, side: str, amount: float, position_side: str) -> Dict:
-        """Place a close position order with correct posSide"""
+        """Place a close position order with correct posSide based on account mode"""
         try:
             endpoint = '/api/v5/trade/order'
-            
+
             # Adjust order size to meet instrument requirements
             adjusted_amount = self.adjust_order_size(symbol, amount)
-            
+
+            # Get account configuration to determine position mode
+            account_config = self.get_account_config()
+            position_mode = account_config.get('position_mode', 'long_short_mode')
+
             # Prepare close order data
             order_data = {
                 'instId': symbol,
                 'tdMode': 'cross',  # Cross margin mode
                 'side': side,  # 'sell' for closing long, 'buy' for closing short
                 'ordType': 'market',
-                'sz': str(adjusted_amount),
-                'posSide': position_side  # Use original position side for closing
+                'sz': str(adjusted_amount)
             }
-            
+
+            # Only add posSide for long_short_mode, not for net_mode
+            if position_mode == 'long_short_mode':
+                order_data['posSide'] = position_side  # 'long' or 'short'
+                print(f"[INFO] Using long_short_mode, posSide={position_side}")
+            else:
+                # In net_mode, we use 'net' or don't specify posSide
+                print(f"[INFO] Using net_mode, no posSide specified")
+
             print(f"[INFO] Placing OKX close order: {order_data}")
-            
+
             response = self._make_request('POST', endpoint, body=order_data)
             print(f"[INFO] OKX close order response: {response}")
-            
+
             order_result = {
                 'success': False,
                 'order_id': None,
                 'message': 'Close order failed'
             }
-            
+
             if 'data' in response and response['data']:
                 order_info = response['data'][0]
                 if order_info.get('sCode') == '0':  # Success
@@ -458,52 +501,86 @@ class OKXClient:
                 else:
                     error_code = order_info.get('sCode', 'Unknown')
                     error_msg = order_info.get('sMsg', 'Close order failed')
-                    order_result['message'] = f"Close Order Error {error_code}: {error_msg}"
-                    print(f"[ERROR] OKX close order failed - Code: {error_code}, Message: {error_msg}")
+
+                    # Handle 51169 error specially - position already closed
+                    if error_code == '51169':
+                        print(f"[INFO] Position already closed (Error 51169) - treating as success")
+                        order_result = {
+                            'success': True,
+                            'order_id': None,
+                            'message': 'Position already closed on exchange',
+                            'already_closed': True
+                        }
+                    else:
+                        order_result['message'] = f"Close Order Error {error_code}: {error_msg}"
+                        print(f"[ERROR] OKX close order failed - Code: {error_code}, Message: {error_msg}")
             else:
                 print(f"[ERROR] Invalid OKX close order response format: {response}")
-            
+
             return order_result
-            
+
         except Exception as e:
-            error_msg = f'Close order failed: {str(e)}'
+            error_msg = str(e)
             print(f"[ERROR] Failed to place close order: {e}")
+
+            # Check if this is a 51169 error (position already closed)
+            if '51169' in error_msg:
+                print(f"[INFO] Position already closed (51169 in exception) - treating as success")
+                return {
+                    'success': True,
+                    'order_id': None,
+                    'message': 'Position already closed on exchange',
+                    'already_closed': True
+                }
+
             return {
                 'success': False,
                 'order_id': None,
-                'message': error_msg
+                'message': f'Close order failed: {error_msg}'
             }
 
-    def place_order(self, symbol: str, side: str, amount: float, 
-                   order_type: str = 'market', price: float = None, 
+    def place_order(self, symbol: str, side: str, amount: float,
+                   order_type: str = 'market', price: float = None,
                    leverage: int = 1) -> Dict:
         """Place a trading order"""
         try:
             endpoint = '/api/v5/trade/order'
-            
+
             # Adjust order size to meet instrument requirements
             adjusted_amount = self.adjust_order_size(symbol, amount)
-            
-            # Prepare order data for long_short_mode
+
+            # Get account configuration to determine position mode
+            account_config = self.get_account_config()
+            position_mode = account_config.get('position_mode', 'long_short_mode')
+
+            # Determine position side
+            pos_side = 'long' if side.lower() in ['buy', 'long'] else 'short'
+
+            # Prepare order data
             order_data = {
                 'instId': symbol,
                 'tdMode': 'cross',  # Cross margin mode
                 'side': 'buy' if side.lower() in ['buy', 'long'] else 'sell',
                 'ordType': order_type,
-                'sz': str(adjusted_amount),
-                'posSide': 'long' if side.lower() in ['buy', 'long'] else 'short'  # Required for long_short_mode
+                'sz': str(adjusted_amount)
             }
-            
+
+            # Only add posSide for long_short_mode
+            if position_mode == 'long_short_mode':
+                order_data['posSide'] = pos_side
+                print(f"[INFO] Using long_short_mode, posSide={pos_side}")
+            else:
+                print(f"[INFO] Using net_mode, no posSide specified")
+
             # Add price for limit orders
             if order_type == 'limit' and price:
                 order_data['px'] = str(price)
-            
+
             print(f"[INFO] Placing OKX order: {order_data}")
-            
+
             # Set leverage if provided
             if leverage > 1:
-                pos_side = 'long' if side.lower() in ['buy', 'long'] else 'short'
-                self._set_leverage(symbol, leverage, pos_side)
+                self._set_leverage(symbol, leverage, pos_side, position_mode)
             
             response = self._make_request('POST', endpoint, body=order_data)
             print(f"[INFO] OKX order response: {response}")
@@ -545,26 +622,39 @@ class OKXClient:
                 'message': error_msg
             }
     
-    def _set_leverage(self, symbol: str, leverage: int, side: str = 'long'):
+    def _set_leverage(self, symbol: str, leverage: int, side: str = 'long', position_mode: str = 'long_short_mode'):
         """Set leverage for a trading pair"""
         try:
             endpoint = '/api/v5/account/set-leverage'
-            
-            # Set leverage for both long and short positions in long_short_mode
-            for pos_side in ['long', 'short']:
+
+            if position_mode == 'long_short_mode':
+                # Set leverage for both long and short positions in long_short_mode
+                for pos_side in ['long', 'short']:
+                    leverage_data = {
+                        'instId': symbol,
+                        'lever': str(leverage),
+                        'mgnMode': 'cross',  # Use cross margin mode
+                        'posSide': pos_side  # Set for both sides
+                    }
+
+                    try:
+                        self._make_request('POST', endpoint, body=leverage_data)
+                        print(f"[INFO] Set leverage {leverage}x for {symbol} {pos_side} position")
+                    except Exception as e:
+                        print(f"[WARNING] Failed to set leverage for {pos_side}: {e}")
+            else:
+                # In net_mode, set leverage without posSide
                 leverage_data = {
                     'instId': symbol,
                     'lever': str(leverage),
-                    'mgnMode': 'cross',  # Use cross margin mode
-                    'posSide': pos_side  # Set for both sides
+                    'mgnMode': 'cross'
                 }
-                
                 try:
                     self._make_request('POST', endpoint, body=leverage_data)
-                    print(f"[INFO] Set leverage {leverage}x for {symbol} {pos_side} position")
+                    print(f"[INFO] Set leverage {leverage}x for {symbol} (net_mode)")
                 except Exception as e:
-                    print(f"[WARNING] Failed to set leverage for {pos_side}: {e}")
-            
+                    print(f"[WARNING] Failed to set leverage: {e}")
+
         except Exception as e:
             print(f"[WARNING] Failed to set leverage: {e}")
             # Don't raise exception as this might not be critical
@@ -643,29 +733,46 @@ class OKXClient:
     def close_position(self, symbol: str, side: str = None) -> Dict:
         """Close position (market order)"""
         try:
-            # Get current position
+            # Clear position cache to get fresh data
+            cache_key = 'positions'
+            if cache_key in self._cache:
+                del self._cache[cache_key]
+                print(f"[INFO] Cleared positions cache for fresh data")
+
+            # Get current position with fresh data
             positions = self.get_positions()
             target_position = None
-            
+
             for pos in positions:
                 if pos['symbol'] == symbol:
                     if side is None or pos['side'] == side:
                         target_position = pos
                         break
-            
+
             if not target_position:
+                print(f"[INFO] No active position found for {symbol} - may already be closed")
                 return {
-                    'success': False,
-                    'message': 'Position not found'
+                    'success': True,  # Not an error - position already closed
+                    'message': 'Position not found - may already be closed',
+                    'already_closed': True
                 }
-            
+
+            # Check if position size is effectively zero
+            position_size = abs(float(target_position['size']))
+            if position_size < 0.0001:  # Effectively zero
+                print(f"[INFO] Position size for {symbol} is effectively zero - treating as closed")
+                return {
+                    'success': True,
+                    'message': 'Position size is zero - already closed',
+                    'already_closed': True
+                }
+
             # For closing positions, we need to use the correct posSide
             position_side = target_position['side']  # 'long' or 'short'
-            position_size = abs(float(target_position['size']))
-            
+
             # Place close order with correct parameters
             close_side = 'sell' if position_side == 'long' else 'buy'
-            
+
             # Use specialized close order method
             return self._place_close_order(
                 symbol=symbol,
@@ -673,10 +780,21 @@ class OKXClient:
                 amount=position_size,
                 position_side=position_side
             )
-            
+
         except Exception as e:
+            error_msg = str(e)
             print(f"[ERROR] Failed to close position: {e}")
+
+            # If 51169 error, treat as already closed
+            if '51169' in error_msg:
+                print(f"[INFO] Position already closed (51169 error) - treating as success")
+                return {
+                    'success': True,
+                    'message': 'Position already closed on exchange',
+                    'already_closed': True
+                }
+
             return {
                 'success': False,
-                'message': f'Close position failed: {str(e)}'
+                'message': f'Close position failed: {error_msg}'
             }

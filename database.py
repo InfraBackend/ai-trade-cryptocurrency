@@ -132,7 +132,10 @@ class Database:
         
         # Database migration: Add stop loss/take profit configuration fields
         self._migrate_stop_loss_take_profit_fields(cursor)
-        
+
+        # Database migration: Add risk management configuration fields
+        self._migrate_risk_management_fields(cursor)
+
         conn.commit()
         conn.close()
     
@@ -180,7 +183,7 @@ class Database:
             # Check if stop loss/take profit fields already exist
             cursor.execute("PRAGMA table_info(models)")
             columns = [column[1] for column in cursor.fetchall()]
-            
+
             # Add missing stop loss/take profit configuration fields
             if 'stop_loss_enabled' not in columns:
                 cursor.execute('ALTER TABLE models ADD COLUMN stop_loss_enabled BOOLEAN DEFAULT 0')
@@ -192,7 +195,35 @@ class Database:
                 cursor.execute('ALTER TABLE models ADD COLUMN take_profit_percentage REAL DEFAULT 15.0')
         except Exception as e:
             print(f"[INFO] Stop loss/take profit fields migration completed or not needed: {e}")
-    
+
+    def _migrate_risk_management_fields(self, cursor):
+        """Migrate database to add risk management configuration fields"""
+        try:
+            # Check if risk management fields already exist
+            cursor.execute("PRAGMA table_info(models)")
+            columns = [column[1] for column in cursor.fetchall()]
+
+            # Add missing risk management configuration fields
+            # Default to False (disabled) to maintain backward compatibility
+            if 'risk_management_enabled' not in columns:
+                cursor.execute('ALTER TABLE models ADD COLUMN risk_management_enabled BOOLEAN DEFAULT 0')
+            if 'max_positions' not in columns:
+                cursor.execute('ALTER TABLE models ADD COLUMN max_positions INTEGER DEFAULT 3')
+            if 'max_risk_per_trade' not in columns:
+                cursor.execute('ALTER TABLE models ADD COLUMN max_risk_per_trade REAL DEFAULT 0.05')
+            if 'max_total_risk' not in columns:
+                cursor.execute('ALTER TABLE models ADD COLUMN max_total_risk REAL DEFAULT 0.15')
+            if 'max_leverage' not in columns:
+                cursor.execute('ALTER TABLE models ADD COLUMN max_leverage INTEGER DEFAULT 20')
+            if 'min_order_size' not in columns:
+                cursor.execute('ALTER TABLE models ADD COLUMN min_order_size REAL DEFAULT 10')
+            if 'max_daily_trades' not in columns:
+                cursor.execute('ALTER TABLE models ADD COLUMN max_daily_trades INTEGER DEFAULT 10')
+            if 'max_drawdown' not in columns:
+                cursor.execute('ALTER TABLE models ADD COLUMN max_drawdown REAL DEFAULT 0.20')
+        except Exception as e:
+            print(f"[INFO] Risk management fields migration completed or not needed: {e}")
+
     def _get_okx_client(self, model_id: int) -> Optional['OKXClient']:
         """Get OKX client for a model if configured"""
         if not OKX_AVAILABLE:
@@ -581,16 +612,32 @@ class Database:
                 positions.append(position)
                 total_unrealized_pnl += pnl
         
-        # Calculate values safely
+        # Calculate values safely - USE OKX's actual data as the source of truth
         total_equity = safe_float(balance_data.get('total_equity', initial_capital), initial_capital)
         available_balance = safe_float(balance_data.get('available_balance', 0))
+
+        # Calculate realized P&L from trade records (more accurate than reverse calculation)
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE model_id = ?
+        ''', (model_id,))
+        realized_pnl_from_trades = cursor.fetchone()['total_pnl']
+        conn.close()
+
+        # Use OKX's total equity as the account value (this is the real balance)
+        total_value = total_equity
+
+        # Calculate realized P&L: Total value - initial capital - unrealized P&L
+        # This shows what we've actually made/lost through closed positions
+        realized_pnl = total_value - initial_capital - total_unrealized_pnl
         
-        # Calculate realized P&L (total equity - initial capital - unrealized P&L)
-        realized_pnl = total_equity - initial_capital - total_unrealized_pnl
-        
-        # Calculate position value and margin used
-        positions_value = sum([safe_float(p['quantity']) * safe_float(p['avg_price']) for p in positions])
+        # Calculate margin used (actual capital occupied)
         margin_used = sum([safe_float(p.get('margin', 0)) for p in positions])
+
+        # For leverage trading, position value should be the margin (occupied capital), not notional value
+        # This represents the actual capital tied up in positions
+        positions_value = margin_used if margin_used > 0 else sum([safe_float(p['quantity']) * safe_float(p['avg_price']) / safe_int(p.get('leverage', 1)) for p in positions])
         
         return {
             'model_id': model_id,
@@ -599,8 +646,9 @@ class Database:
             'positions': positions,
             'positions_value': positions_value,
             'margin_used': margin_used,
-            'total_value': total_equity,
-            'realized_pnl': realized_pnl,
+            'total_value': total_value,  # From OKX API - this is the real account value
+            'realized_pnl': realized_pnl,  # Calculated from total value
+            'realized_pnl_from_trades': realized_pnl_from_trades,  # Calculated from trade records
             'unrealized_pnl': total_unrealized_pnl
         }
     
@@ -659,10 +707,11 @@ class Database:
         
         # Cash = initial capital + realized P&L - margin used
         cash = initial_capital + realized_pnl - margin_used
-        
-        # Position value = quantity * entry price (not margin!)
-        positions_value = sum([p['quantity'] * p['avg_price'] for p in positions])
-        
+
+        # Position value = margin used (actual capital tied up in positions)
+        # For leverage trading, this is the occupied capital, not the notional value
+        positions_value = margin_used
+
         # Total account value = initial capital + realized P&L + unrealized P&L
         total_value = initial_capital + realized_pnl + unrealized_pnl
         
@@ -670,6 +719,7 @@ class Database:
         
         return {
             'model_id': model_id,
+            'initial_capital': initial_capital,
             'cash': cash,
             'positions': positions,
             'positions_value': positions_value,

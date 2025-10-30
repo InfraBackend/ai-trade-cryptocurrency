@@ -366,16 +366,185 @@ def execute_trading(model_id):
         model = db.get_model(model_id)
         if not model:
             return jsonify({'error': 'Model not found'}), 404
-        
+
         # Use the new initialization logic with OKX support
         if not init_trading_engine_with_okx(model_id):
             return jsonify({'error': 'Failed to initialize trading engine'}), 500
-    
+
     try:
         result = trading_engines[model_id].execute_trading_cycle()
         return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/models/<int:model_id>/sync-positions', methods=['POST'])
+def sync_positions(model_id):
+    """手动触发持仓同步，确保数据库与OKX持仓一致"""
+    if model_id not in trading_engines:
+        model = db.get_model(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+
+        # Use the new initialization logic with OKX support
+        if not init_trading_engine_with_okx(model_id):
+            return jsonify({'error': 'Failed to initialize trading engine'}), 500
+
+    engine = trading_engines[model_id]
+
+    if not engine.okx_client:
+        return jsonify({'error': 'OKX client not configured for this model'}), 400
+
+    try:
+        # 强制同步，忽略缓存
+        engine.sync_positions_with_exchange(force=True)
+
+        # 获取同步后的持仓信息
+        prices_data = market_fetcher.get_current_prices(engine.coins)
+        current_prices = {coin: prices_data[coin]['price'] for coin in prices_data}
+        portfolio = db.get_portfolio(model_id, current_prices)
+
+        return jsonify({
+            'success': True,
+            'message': '持仓同步完成',
+            'portfolio': portfolio
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/models/<int:model_id>/account-diagnosis', methods=['GET'])
+def account_diagnosis(model_id):
+    """诊断账户数据，对比OKX实际数据与交易记录"""
+    if model_id not in trading_engines:
+        model = db.get_model(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+
+        if not init_trading_engine_with_okx(model_id):
+            return jsonify({'error': 'Failed to initialize trading engine'}), 500
+
+    engine = trading_engines[model_id]
+
+    if not engine.okx_client:
+        return jsonify({'error': 'OKX client not configured for this model'}), 400
+
+    try:
+        # 获取当前价格
+        prices_data = market_fetcher.get_current_prices(engine.coins)
+        current_prices = {coin: prices_data[coin]['price'] for coin in prices_data}
+
+        # 获取投资组合数据
+        portfolio = db.get_portfolio(model_id, current_prices)
+
+        # 获取模型信息
+        model = db.get_model(model_id)
+
+        # 计算差异
+        okx_total = portfolio['total_value']
+        initial = portfolio['initial_capital']
+        unrealized = portfolio['unrealized_pnl']
+        realized_from_okx = portfolio['realized_pnl']
+        realized_from_trades = portfolio.get('realized_pnl_from_trades', 0)
+
+        # 差异分析
+        discrepancy = realized_from_okx - realized_from_trades
+
+        # 反推真实初始资金
+        calculated_initial = okx_total - realized_from_trades - unrealized
+
+        return jsonify({
+            'success': True,
+            'okx_data': {
+                'total_value': okx_total,
+                'cash': portfolio['cash'],
+                'margin_used': portfolio['margin_used'],
+                'unrealized_pnl': unrealized
+            },
+            'calculation': {
+                'initial_capital': initial,
+                'realized_pnl_from_okx': realized_from_okx,
+                'realized_pnl_from_trades': realized_from_trades,
+                'unrealized_pnl': unrealized,
+                'discrepancy': discrepancy,
+                'calculated_initial_capital': calculated_initial
+            },
+            'analysis': {
+                'total_return': ((okx_total - initial) / initial * 100),
+                'using_okx_data': ((okx_total - initial) / initial * 100),
+                'using_trade_records': ((initial + realized_from_trades + unrealized - initial) / initial * 100),
+                'real_return_if_initial_correct': ((okx_total - calculated_initial) / calculated_initial * 100) if calculated_initial > 0 else 0
+            },
+            'recommendation': {
+                'message': f'建议将初始资金从 ${initial:,.2f} 更新为 ${calculated_initial:,.2f}',
+                'calculated_initial_capital': calculated_initial
+            },
+            'message': f'OKX实际总值: ${okx_total:,.2f}, 交易记录盈亏: ${realized_from_trades:,.2f}, 差异: ${discrepancy:,.2f}'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/models/<int:model_id>/calibrate-initial-capital', methods=['POST'])
+def calibrate_initial_capital(model_id):
+    """校准初始资金"""
+    model = db.get_model(model_id)
+    if not model:
+        return jsonify({'error': 'Model not found'}), 404
+
+    data = request.get_json()
+
+    # 支持两种方式：手动输入 或 自动计算
+    if 'initial_capital' in data:
+        # 方式1: 手动输入
+        new_initial = float(data['initial_capital'])
+    elif data.get('auto_calculate', False):
+        # 方式2: 自动从OKX数据反推
+        if model_id not in trading_engines:
+            if not init_trading_engine_with_okx(model_id):
+                return jsonify({'error': 'Failed to initialize trading engine'}), 500
+
+        engine = trading_engines[model_id]
+        if not engine.okx_client:
+            return jsonify({'error': 'OKX client not configured for this model'}), 400
+
+        # 获取当前数据
+        prices_data = market_fetcher.get_current_prices(engine.coins)
+        current_prices = {coin: prices_data[coin]['price'] for coin in prices_data}
+        portfolio = db.get_portfolio(model_id, current_prices)
+
+        # 反推计算
+        okx_total = portfolio['total_value']
+        unrealized = portfolio['unrealized_pnl']
+        realized_from_trades = portfolio.get('realized_pnl_from_trades', 0)
+
+        new_initial = okx_total - realized_from_trades - unrealized
+    else:
+        return jsonify({'error': 'Please provide initial_capital or set auto_calculate to true'}), 400
+
+    # 更新数据库
+    conn = db.get_connection()
+    cursor = conn.cursor()
+
+    old_initial = model['initial_capital']
+
+    cursor.execute('''
+        UPDATE models SET initial_capital = ? WHERE id = ?
+    ''', (new_initial, model_id))
+
+    conn.commit()
+    conn.close()
+
+    # 清除缓存
+    if hasattr(db, '_okx_cache'):
+        cache_key = f'okx_portfolio_{model_id}'
+        if cache_key in db._okx_cache:
+            del db._okx_cache[cache_key]
+
+    return jsonify({
+        'success': True,
+        'message': '初始资金已更新',
+        'old_initial_capital': old_initial,
+        'new_initial_capital': new_initial,
+        'adjustment': new_initial - old_initial
+    })
 
 def trading_loop():
     print("[INFO] Trading loop started")

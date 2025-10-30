@@ -13,21 +13,27 @@ class RiskManager:
     def __init__(self, model_id: int, db):
         self.model_id = model_id
         self.db = db
+
+        # Load risk configuration from model settings
+        model = self.db.get_model(model_id)
+
+        # Check if risk management is enabled for this model
+        self.risk_management_enabled = model.get('risk_management_enabled', False) if model else False
+
+        # Default risk parameters (only used if risk management is enabled)
+        self.max_positions = model.get('max_positions', 3) if model else 3
+        self.max_risk_per_trade = model.get('max_risk_per_trade', 0.05) if model else 0.05  # 5% of account
+        self.max_total_risk = model.get('max_total_risk', 0.15) if model else 0.15  # 15% of account
+        self.max_leverage = model.get('max_leverage', 20) if model else 20
+        self.min_order_size = model.get('min_order_size', 10) if model else 10  # Minimum $10 order
+        self.max_daily_trades = model.get('max_daily_trades', 10) if model else 10
+        self.max_drawdown = model.get('max_drawdown', 0.20) if model else 0.20  # 20% max drawdown
         
-        # Risk parameters (can be made configurable)
-        self.max_positions = 3
-        self.max_risk_per_trade = 0.05  # 5% of account
-        self.max_total_risk = 0.15      # 15% of account
-        self.max_leverage = 20
-        self.min_order_size = 10        # Minimum $10 order
-        self.max_daily_trades = 10
-        self.max_drawdown = 0.20        # 20% max drawdown
-        
-    def validate_order(self, coin: str, side: str, quantity: float, 
-                      leverage: int, current_price: float, 
+    def validate_order(self, coin: str, side: str, quantity: float,
+                      leverage: int, current_price: float,
                       portfolio: Dict) -> Dict:
         """Comprehensive order validation"""
-        
+
         validation_result = {
             'valid': True,
             'errors': [],
@@ -35,7 +41,11 @@ class RiskManager:
             'adjusted_quantity': quantity,
             'adjusted_leverage': leverage
         }
-        
+
+        # If risk management is disabled, skip all validations
+        if not self.risk_management_enabled:
+            return validation_result
+
         try:
             # 1. Check position limits
             current_positions = len(portfolio.get('positions', []))
